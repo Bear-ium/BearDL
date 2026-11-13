@@ -386,7 +386,7 @@ fn playlist_panel(app: &mut App, ui: &mut egui::Ui, title: &str, channel: &str, 
         if !channel.is_empty() {
             ui.weak(channel);
         }
-        ui.weak(format!("{} items", entries.len()));
+        ui.weak(crate::util::plural(entries.len() as u64, "item", "items"));
     });
     options_row(ui, &mut dl.opts, false);
     let filter = dl.entry_filter.to_lowercase();

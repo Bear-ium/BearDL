@@ -1226,3 +1226,42 @@ fn library_100k_performance() {
     }
     // `dir` drops here, after the Db is closed, removing the db, -wal and -shm files.
 }
+
+/// Writes a 100,000-entry library to `BEARDL_GEN_DB` for manual UI testing.
+#[test]
+#[ignore]
+fn generate_100k_library() {
+    let Some(path) = std::env::var_os("BEARDL_GEN_DB") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let _ = std::fs::remove_file(&path);
+    let mut db = Db::open(&path).unwrap();
+    let words = [
+        "rust", "cooking", "travel", "music", "review", "science", "history", "space",
+    ];
+    let rows: Vec<Download> = (0..100_000)
+        .map(|i| Download {
+            url: format!("https://example.com/watch?v={i}"),
+            video_id: format!("v{i:08}"),
+            title: format!(
+                "{} {} episode {i}",
+                words[i % words.len()],
+                words[(i / 7) % words.len()]
+            ),
+            channel: format!("Channel {}", i % 500),
+            duration: Some((i % 7200) as f64 + 30.0),
+            status: Some(Status::Queued),
+            created_at: 1_600_000_000 + i as i64 * 300,
+            ..Default::default()
+        })
+        .collect();
+    db.insert_downloads(&rows).unwrap();
+    db.conn
+        .execute(
+            "UPDATE downloads SET status = 'done', in_queue = 0, file_size = id * 1000003 % 4000000000, \
+             file_path = 'C:/Videos/' || video_id || '.mp4'",
+            [],
+        )
+        .unwrap();
+}

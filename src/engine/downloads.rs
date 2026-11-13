@@ -606,9 +606,8 @@ impl Core {
             });
         }
         let date_after = options.date_after.trim().to_owned();
-        // Share the global limit among the downloads running now (including this one).
-        let rate = crate::util::parse_rate(&self.settings.rate_limit)
-            .map(|r| (r / (self.running.len() as u64 + 1)).max(1024));
+        // Each process gets an equal share, so all of them together never exceed the limit.
+        let rate = self.settings.per_process_rate().map(|r| r.max(1024));
         let args = ytdlp::download_args(&ytdlp::Job {
             url: &d.url,
             options: &options,

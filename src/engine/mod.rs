@@ -231,6 +231,7 @@ pub struct EngineConfig {
 
 impl Engine {
     pub fn start(cfg: EngineConfig, waker: Waker) -> Self {
+        crate::net::reset_cancel();
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             waker,
@@ -551,6 +552,7 @@ impl Core {
                         options: serde_json::from_str(&json).unwrap_or_default(),
                     })
                     .collect();
+                self.refresh_subs();
                 self.shared.update(|s| {
                     s.presets = presets;
                     s.imported_settings = sum.settings.clone();

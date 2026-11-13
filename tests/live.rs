@@ -421,6 +421,7 @@ fn trims_fast_and_accurate() {
         st.trims.len() == 2 && st.trims.iter().all(|t| t.done)
     });
     let trims = engine.state().trims.clone();
+    let ffprobe = engine.state().paths.ffprobe.clone().expect("ffprobe");
     drop(engine);
     for t in &trims {
         assert!(t.error.is_none(), "{:?}", t.error);
@@ -439,7 +440,7 @@ fn trims_fast_and_accurate() {
     for r in rows {
         let d = db.get_download(r.id).unwrap().unwrap();
         assert!(std::path::Path::new(&d.file_path).is_file());
-        let out = std::process::Command::new("ffprobe")
+        let out = std::process::Command::new(&ffprobe)
             .args([
                 "-v",
                 "error",
@@ -466,5 +467,102 @@ fn trims_fast_and_accurate() {
     assert!(
         durations.iter().any(|d| (d - 3.0).abs() < 0.2),
         "the accurate clip is exact: {durations:?}"
+    );
+}
+
+#[test]
+#[ignore]
+fn default_preset_merges_best_video_and_audio() {
+    let h = home("merge");
+    let engine = start(&h);
+    wait("yt-dlp install", 180, || {
+        engine.state().paths.ytdlp.is_some()
+    });
+    engine.send(Cmd::Enqueue(vec![NewItem {
+        url: VIDEO.into(),
+        title: "merge".into(),
+        options: DownloadOptions {
+            subtitles: false,
+            auto_subtitles: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    }]));
+    wait("download", 300, || {
+        engine
+            .state()
+            .queue
+            .first()
+            .is_some_and(|q| !matches!(q.status, Status::Queued | Status::Running))
+    });
+    let q = engine.state().queue[0].clone();
+    assert_eq!(q.status, Status::Done, "{}", q.error);
+    let ffprobe = engine.state().paths.ffprobe.clone().expect("ffprobe");
+    let out = std::process::Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&q.file_path)
+        .output()
+        .unwrap();
+    let streams = String::from_utf8_lossy(&out.stdout).to_string();
+    eprintln!("{} -> {streams:?}", q.file_path);
+    assert!(streams.contains("video") && streams.contains("audio"));
+}
+
+#[test]
+#[ignore]
+fn export_then_import_through_the_engine() {
+    use beardl::export::ImportMode;
+    let h = home("export");
+    let engine = start(&h);
+    wait("presets loaded", 30, || !engine.state().presets.is_empty());
+    engine.send(Cmd::AddSubscription {
+        name: "Example".into(),
+        url: "https://www.youtube.com/@jawed/videos".into(),
+        config: beardl::subs::SubConfig {
+            first_check: beardl::subs::FirstCheck::OnlyNew,
+            ..Default::default()
+        },
+    });
+    wait("subscription", 30, || {
+        !engine.state().subscriptions.is_empty()
+    });
+    let file = h.join("export.json");
+    engine.send(Cmd::Export {
+        path: file.clone(),
+        settings: Box::new(Settings {
+            concurrency: 6,
+            ..Default::default()
+        }),
+    });
+    wait("export file", 30, || file.is_file());
+    drop(engine);
+
+    let h2 = home("import");
+    let engine = start(&h2);
+    wait("presets loaded", 30, || !engine.state().presets.is_empty());
+    engine.send(Cmd::Import {
+        path: file,
+        mode: ImportMode::Merge,
+        current: Box::new(Settings::default()),
+    });
+    wait("imported settings", 30, || {
+        engine.state().imported_settings.is_some()
+    });
+    let st = engine.state();
+    assert_eq!(st.imported_settings.as_ref().unwrap().concurrency, 6);
+    assert!(st.presets.len() >= 7);
+    // Imported subscriptions are listed straight away, without a restart.
+    assert!(
+        st.subscriptions
+            .iter()
+            .any(|s| s.sub.name == "Example" || s.sub.name == "jawed"),
+        "imported subscription listed"
     );
 }

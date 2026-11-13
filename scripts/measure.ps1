@@ -1,10 +1,10 @@
 # Measures release binary size, cold start, idle memory and idle CPU.
 # Usage: powershell -File scripts/measure.ps1 [-NoBuild] [-Warmup <seconds before idle measurement>]
-param([switch]$NoBuild, [int]$Warmup = 30)
+param([switch]$NoBuild, [int]$Warmup = 30, [string]$Exe = 'target/release/beardl.exe')
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not $NoBuild) { cargo build --release | Out-Null }
-$exe = Resolve-Path 'target/release/beardl.exe'
+$exe = Resolve-Path $Exe
 $size = (Get-Item $exe).Length
 
 # Isolated profile so measurements do not depend on the user's library.

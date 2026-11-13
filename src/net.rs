@@ -33,6 +33,11 @@ pub fn cancel_all() {
     CANCEL.store(true, Ordering::SeqCst);
 }
 
+/// Allows downloads again (an engine starting after another shut down).
+pub fn reset_cancel() {
+    CANCEL.store(false, Ordering::SeqCst);
+}
+
 /// Aborts the transfer if it stalls below 1 KiB/s for a minute.
 fn curl_base() -> std::process::Command {
     let mut c = command(curl());

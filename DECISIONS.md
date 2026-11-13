@@ -7,7 +7,7 @@
 - **System curl and tar instead of an HTTP/TLS crate.** Windows 10 1803+, macOS and nearly all Linux distros ship both. On Windows they are called from `%SystemRoot%\System32` so Git's copies don't shadow them. This saves ~2 MB of TLS stack. Downloads are verified with SHA-256 (`sha2`).
 - **libmpv via hand-written FFI and `libloading`.** `libmpv2`/`libmpv-sys` link at build time, so the exe would not start without the DLL.
 - **Tray.** Windows uses a hand-rolled `Shell_NotifyIconW` (windows-sys is already in the tree via winit), which also provides balloon notifications. macOS and Linux use `tray-icon`, with the `ksni` backend on Linux so GTK is not needed. Notifications on Linux and macOS go through `notify-send` and `osascript`, not notify-rust and its zbus stack.
-- **Global rate limit.** yt-dlp only limits per process, so each process gets `global / concurrency`. The approximation is documented in the UI.
+- **Global rate limit.** yt-dlp only limits per process, so each process gets `global / concurrency`. All of them together never exceed the limit, though fewer running downloads use less of it. An earlier per-start split could exceed the limit, so it was replaced.
 - **Title filters are comma-separated keywords** (case-insensitive substring match), not regex. This avoids the regex crate.
 - **Cold start is measured from launch to the second painted frame**, using wall-clock timestamps written by `BEARDL_STARTUP_LOG`. Process teardown is excluded: the GL driver takes ~700 ms to unload. About 200 ms of the 233 ms baseline is window and GL context creation, which egui cannot avoid.
 - **Idle memory is ~70 MiB private at baseline.** Nearly all of it is the OpenGL driver (NVIDIA). The app's own heap is a few MiB.
@@ -26,7 +26,6 @@
 - **Custom arguments are validated by yt-dlp itself.** The run uses `--simulate` and a URL that cannot be fetched; a usage error (exit 2, `error:` on stderr) means invalid. `--version` as a terminator was tried and does not work: yt-dlp accepted unknown options before it.
 - **The reserved-option check** covers what yt-dlp's optparse would accept: unique prefixes of long options, short-flag clusters, a bare `--`, and stray URLs. `--exec` stays allowed, because presets are the user's own. Imported presets are shown before use (M4).
 - **Process trees.** On Windows each yt-dlp runs inside a Job Object with kill-on-close, so pause, cancel, app exit and even a crash also kill the ffmpeg it started. On Unix each runs in its own process group, which gets SIGKILL. This replaced the blocking `taskkill /T`.
-- **The global rate limit** is split among the downloads running when each one starts. yt-dlp cannot change a running process's limit, so the split is approximate when the count changes mid-download.
 - **Queue reorder** writes one row, at the midpoint between its new neighbours. It renumbers only when positions converge.
 - **Quick Download of a playlist or channel** expands it into one item per video. A channel root opens its Videos tab.
 - **Without ffmpeg**, downloads fall back to the best single-file format, and conversion, merging and embedding are skipped, with a one-time notice. The queue waits while an ffmpeg install is in progress.
@@ -98,3 +97,6 @@
   - Clips go next to the source, or to the download folder if that is read-only. They become new library entries (dated now, no subscription) that share the source's thumbnail.
   - The preview is an mpv A-B loop, cleared when a new file opens.
 - **M7 and M8 share one commit**, because their review fixes touch the same engine and player files.
+- **M9 profile comparison (full app).** `s`: 5.56 MiB. `z`: 5.87 MiB. `3`: 7.24 MiB. Cold start (243–257 ms) and idle memory are the same within noise, so `opt-level = "s"` stays. Unused windows-sys features (`Win32_Graphics_Gdi`, `Win32_Security`, `Win32_System_Threading`) were removed.
+- **Idle profile.** A frame trace shows two frames at start, then none while idle, and no engine wake-ups. 70–75 MiB private memory is almost all the OpenGL driver.
+- **The tools' "cancel downloads" flag is cleared when an engine starts.** It stayed set after one engine shut down, which broke a second engine in the same process; only the test suite does that.
