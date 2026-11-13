@@ -10,6 +10,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         general(app, ui);
         ui.add_space(12.0);
+        super::presets_view::show(app, ui);
+        ui.add_space(12.0);
         tools(app, ui);
     });
 }
@@ -41,7 +43,7 @@ fn general(app: &mut App, ui: &mut egui::Ui) {
                 ui.add(
                     egui::TextEdit::singleline(&mut s.rate_limit)
                         .hint_text("none, e.g. 5M or 800K")
-                        .desired_width(140.0),
+                        .desired_width(170.0),
                 );
                 if !s.rate_limit.trim().is_empty()
                     && crate::util::parse_rate(&s.rate_limit).is_none()
@@ -55,7 +57,7 @@ fn general(app: &mut App, ui: &mut egui::Ui) {
             ui.label("Subtitle languages");
             ui.add(
                 egui::TextEdit::singleline(&mut s.subtitle_langs)
-                    .hint_text("en.*,en")
+                    .hint_text("en,en-US,en-GB")
                     .desired_width(200.0),
             );
             ui.end_row();

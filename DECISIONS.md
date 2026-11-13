@@ -21,3 +21,17 @@
   - The extra HEAD request per tool download is kept for progress totals, since it happens only on tool updates.
   - Skipping auto-install while downloads run lands in M2 with the queue.
 - **M1 cold start.** In-process time to the second frame is unchanged from M0 (~240 ms). The external figure varies by ±50 ms with process loading and Defender scanning of the larger exe.
+- **yt-dlp runs with `--ignore-errors`.** A subtitle 429 or a failed thumbnail must not lose the video. A run counts as successful when yt-dlp prints the final path (`after_move`). Exit 0 without a file means Skipped (filtered out or already archived).
+- **The default subtitle languages are `en,en-US,en-GB`, not `en.*`.** On YouTube, `en.*` also matches dozens of auto-translated tracks and triggers HTTP 429.
+- **Custom arguments are validated by yt-dlp itself.** The run uses `--simulate` and a URL that cannot be fetched; a usage error (exit 2, `error:` on stderr) means invalid. `--version` as a terminator was tried and does not work: yt-dlp accepted unknown options before it.
+- **The reserved-option check** covers what yt-dlp's optparse would accept: unique prefixes of long options, short-flag clusters, a bare `--`, and stray URLs. `--exec` stays allowed, because presets are the user's own. Imported presets are shown before use (M4).
+- **Process trees.** On Windows each yt-dlp runs inside a Job Object with kill-on-close, so pause, cancel, app exit and even a crash also kill the ffmpeg it started. On Unix each runs in its own process group, which gets SIGKILL. This replaced the blocking `taskkill /T`.
+- **The global rate limit** is split among the downloads running when each one starts. yt-dlp cannot change a running process's limit, so the split is approximate when the count changes mid-download.
+- **Queue reorder** writes one row, at the midpoint between its new neighbours. It renumbers only when positions converge.
+- **Quick Download of a playlist or channel** expands it into one item per video. A channel root opens its Videos tab.
+- **Without ffmpeg**, downloads fall back to the best single-file format, and conversion, merging and embedding are skipped, with a one-time notice. The queue waits while an ffmpeg install is in progress.
+- **Thumbnails are not embedded into WAV or WebM**, which do not support it.
+- **M2 review items not changed:**
+  - The analysis spinner animates while yt-dlp runs. It only lasts a few seconds.
+  - Downloads without a known total show bytes instead of an animated bar, so a live stream doesn't repaint continuously.
+- **M2 is measured before its review fixes.** M3 re-measures.

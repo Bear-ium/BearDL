@@ -1,9 +1,15 @@
+// Message enums (commands, outcomes) are short-lived; boxing their large variants gains nothing.
+#![allow(clippy::large_enum_variant)]
+
+pub mod db;
 pub mod engine;
 pub mod error;
 pub mod net;
 pub mod paths;
 pub mod settings;
 pub mod startup;
+pub mod thumbs;
 pub mod tools;
 pub mod ui;
 pub mod util;
+pub mod ytdlp;

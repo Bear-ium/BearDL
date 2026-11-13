@@ -1,5 +1,10 @@
+mod downloads_view;
 pub mod fonts;
+mod library_view;
+mod presets_view;
 mod settings_view;
+#[cfg(feature = "dev-shots")]
+mod shots;
 
 use crate::engine::{Engine, Level, Notice};
 use crate::settings::Settings;
@@ -25,6 +30,12 @@ impl Page {
         Page::Settings,
     ];
 
+    pub fn from_name(s: &str) -> Option<Page> {
+        Page::ALL
+            .into_iter()
+            .find(|p| format!("{p:?}").eq_ignore_ascii_case(s))
+    }
+
     fn label(self) -> &'static str {
         match self {
             Page::Downloads => "⬇  Downloads",
@@ -47,9 +58,14 @@ pub struct App {
     pub(crate) settings: Settings,
     saved_settings: Settings,
     page: Page,
+    dl: downloads_view::DownloadsUi,
+    lib: library_view::LibraryUi,
+    presets: presets_view::PresetsUi,
     toasts: Vec<Toast>,
     bench_exit: bool,
     frames: u32,
+    #[cfg(feature = "dev-shots")]
+    shots: Option<shots::Shots>,
 }
 
 const TOAST_SECS: f64 = 6.0;
@@ -64,19 +80,49 @@ impl App {
         crate::startup::mark("fonts set");
         let ctx = cc.egui_ctx.clone();
         let engine = Engine::start(
-            settings.clone(),
-            crate::paths::tools_dir(),
-            std::sync::Arc::new(move || ctx.request_repaint()),
+            crate::engine::EngineConfig {
+                settings: settings.clone(),
+                tools_dir: crate::paths::tools_dir(),
+                db_path: crate::paths::db_path(),
+                thumbs_dir: crate::paths::thumbs_dir(),
+                subs_dir: crate::paths::subs_dir(),
+            },
+            std::sync::Arc::new(move |d: std::time::Duration| {
+                if d.is_zero() {
+                    ctx.request_repaint();
+                } else {
+                    ctx.request_repaint_after(d);
+                }
+            }),
         );
         Self {
             engine,
             saved_settings: settings.clone(),
             settings,
             page: Page::Downloads,
+            dl: Default::default(),
+            lib: Default::default(),
+            presets: Default::default(),
             toasts: Vec::new(),
             bench_exit,
             frames: 0,
+            #[cfg(feature = "dev-shots")]
+            shots: shots::Shots::from_env(),
         }
+        .with_dev_setup()
+    }
+
+    fn with_dev_setup(#[allow(unused_mut)] mut self) -> Self {
+        #[cfg(feature = "dev-shots")]
+        if let Some(s) = &self.shots {
+            if let Some(p) = s.page.as_deref().and_then(Page::from_name) {
+                self.page = p;
+            }
+            if let Some(u) = s.url.clone() {
+                self.engine.send(crate::engine::Cmd::Analyse(u));
+            }
+        }
+        self
     }
 
     fn sync_settings(&mut self, ctx: &egui::Context) {
@@ -92,6 +138,18 @@ impl App {
         self.engine.send(crate::engine::Cmd::ApplySettings(Box::new(
             self.settings.clone(),
         )));
+    }
+
+    /// Plays a library entry, optionally from a position in seconds.
+    pub(crate) fn play(&mut self, d: &crate::db::Download, _start: Option<f64>) {
+        let p = std::path::Path::new(&d.file_path);
+        if p.is_file() {
+            if let Err(e) = crate::util::open_path(p) {
+                self.push_toast(Level::Error, format!("Could not open the file: {e}"));
+            }
+        } else {
+            self.push_toast(Level::Error, "The file is missing".into());
+        }
     }
 
     pub(crate) fn push_toast(&mut self, level: Level, text: String) {
@@ -200,21 +258,22 @@ impl eframe::App for App {
                 ui.add_space(8.0);
                 ui.heading("BearDL");
                 ui.add_space(8.0);
-                for p in Page::ALL {
-                    let r = ui.add_sized(
-                        [ui.available_width(), 28.0],
-                        egui::Button::selectable(self.page == p, p.label()),
-                    );
-                    if r.clicked() {
-                        self.page = p;
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                    ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+                    for p in Page::ALL {
+                        if ui.selectable_label(self.page == p, p.label()).clicked() {
+                            self.page = p;
+                        }
                     }
-                }
+                });
             });
         egui::Panel::bottom("status")
             .exact_size(26.0)
             .show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::default_margins().show(ui, |ui| match self.page {
             Page::Settings => settings_view::show(self, ui),
+            Page::Downloads => downloads_view::show(self, ui),
+            Page::Library => library_view::show(self, ui),
             other => {
                 ui.heading(other.label());
                 ui.weak("Coming in a later milestone.");
@@ -223,6 +282,10 @@ impl eframe::App for App {
         self.show_toasts(&ctx);
         self.sync_settings(&ctx);
 
+        #[cfg(feature = "dev-shots")]
+        if let Some(s) = self.shots.as_mut() {
+            s.tick(&ctx);
+        }
         self.frames += 1;
         if self.frames <= 2 {
             crate::startup::mark("frame");

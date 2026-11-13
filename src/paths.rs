@@ -72,6 +72,10 @@ pub fn thumbs_dir() -> PathBuf {
     cache_dir().join("thumbs")
 }
 
+pub fn subs_dir() -> PathBuf {
+    cache_dir().join("subs")
+}
+
 pub fn themes_dir() -> PathBuf {
     config_dir().join("themes")
 }
@@ -100,6 +104,7 @@ pub fn ensure_dirs() -> std::io::Result<()> {
         data_dir(),
         tools_dir(),
         thumbs_dir(),
+        subs_dir(),
         themes_dir(),
     ] {
         std::fs::create_dir_all(d)?;

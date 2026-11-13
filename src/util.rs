@@ -28,6 +28,74 @@ pub fn async_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Co
     c
 }
 
+/// Owns a child process tree (yt-dlp and the ffmpeg it starts). Killing is immediate and
+/// non-blocking, and dropping the guard kills the tree too. On Windows the tree lives in a
+/// Job Object with kill-on-close, so the OS also cleans up if this app crashes.
+pub struct ProcessGuard {
+    #[cfg(windows)]
+    job: isize,
+    #[cfg(unix)]
+    pgid: i32,
+}
+
+impl ProcessGuard {
+    #[cfg(windows)]
+    pub fn attach(child: &tokio::process::Child) -> Option<Self> {
+        use windows_sys::Win32::System::JobObjects::*;
+        let handle = child.raw_handle()?;
+        // SAFETY: Win32 calls with valid arguments; the job handle is owned by the guard.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if AssignProcessToJobObject(job, handle as _) == 0 {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+                return None;
+            }
+            Some(Self { job: job as isize })
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn attach(child: &tokio::process::Child) -> Option<Self> {
+        // Children start in their own process group (see `async_command`).
+        child.id().map(|pid| Self { pgid: pid as i32 })
+    }
+
+    pub fn kill(&self) {
+        #[cfg(windows)]
+        // SAFETY: the job handle is valid until drop.
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job as _, 1);
+        }
+        #[cfg(unix)]
+        // SAFETY: signal to the process group we created.
+        unsafe {
+            libc::kill(-self.pgid, libc::SIGKILL);
+        }
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        self.kill();
+        #[cfg(windows)]
+        // SAFETY: closing the handle we own.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.job as _);
+        }
+    }
+}
+
 pub fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

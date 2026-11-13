@@ -1,23 +1,73 @@
 //! Background engine: one thread running a current-thread tokio runtime. The UI sends
 //! [`Cmd`]s; the engine updates [`State`] behind a mutex and wakes the UI. When nothing is
 //! happening it sleeps until the next scheduled task.
+mod downloads;
+mod tooljobs;
+
+pub use downloads::{ItemProgress, NewItem, QueueItem};
+
+use crate::db::Db;
 use crate::settings::Settings;
 use crate::tools::{Channel, ToolPaths, Tools, UpdateInfo};
 use crate::util::unix_now;
+use crate::ytdlp::{Analysis, Preset};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tooljobs::ToolJob;
 
-pub type Waker = Arc<dyn Fn() + Send + Sync>;
+/// Asks the UI to repaint after the given delay (zero means now).
+pub type Waker = Arc<dyn Fn(Duration) + Send + Sync>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveTo {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
 
 #[derive(Debug)]
 pub enum Cmd {
-    CheckTools { manual: bool },
+    CheckTools {
+        manual: bool,
+    },
     UpdateYtdlp,
     RollbackYtdlp,
     InstallFfmpeg,
     RollbackFfmpeg,
     ApplySettings(Box<Settings>),
+    Analyse(String),
+    ClearAnalysis,
+    Enqueue(Vec<NewItem>),
+    /// Queue URLs with a preset; playlists and channels are expanded first.
+    QuickAdd {
+        urls: Vec<String>,
+        template: NewItem,
+    },
+    ScanFiles,
+    DeleteEntries {
+        ids: Vec<i64>,
+        delete_files: bool,
+    },
+    Redownload(i64),
+    Pause(i64),
+    Resume(i64),
+    Cancel(i64),
+    Retry(i64),
+    Remove(i64),
+    Move(i64, MoveTo),
+    PauseAll,
+    ResumeAll,
+    ClearFinished,
+    SavePreset {
+        old_name: Option<String>,
+        preset: Preset,
+    },
+    DeletePreset(String),
+    ValidateArgs(String),
     Shutdown,
 }
 
@@ -56,11 +106,27 @@ pub struct ToolsView {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct AnalysisView {
+    pub url: String,
+    pub busy: bool,
+    pub result: Option<Result<Arc<Analysis>, String>>,
+}
+
 #[derive(Default)]
 pub struct State {
     pub tools: ToolsView,
     pub paths: ToolPaths,
     pub notices: Vec<Notice>,
+    pub queue: Vec<QueueItem>,
+    pub presets: Vec<Preset>,
+    pub analysis: Option<AnalysisView>,
+    /// Result of the last custom-argument validation: (args, outcome).
+    pub validation: Option<(String, Option<Result<(), String>>)>,
+    /// Bumped whenever the library changes, so views know to re-query.
+    pub library_rev: u64,
+    /// Quick downloads still being expanded into items.
+    pub expanding: usize,
 }
 
 impl State {
@@ -69,6 +135,10 @@ impl State {
             level,
             text: text.into(),
         });
+    }
+
+    pub fn item_mut(&mut self, id: i64) -> Option<&mut QueueItem> {
+        self.queue.iter_mut().find(|q| q.id == id)
     }
 }
 
@@ -83,7 +153,12 @@ impl Shared {
     }
 
     pub fn wake(&self) {
-        (self.waker)();
+        (self.waker)(Duration::ZERO);
+    }
+
+    /// Coalesced wake for frequent updates such as progress: at most a few repaints per second.
+    pub fn wake_soon(&self) {
+        (self.waker)(Duration::from_millis(150));
     }
 
     /// Mutates state and wakes the UI.
@@ -100,8 +175,16 @@ pub struct Engine {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+pub struct EngineConfig {
+    pub settings: Settings,
+    pub tools_dir: PathBuf,
+    pub db_path: PathBuf,
+    pub thumbs_dir: PathBuf,
+    pub subs_dir: PathBuf,
+}
+
 impl Engine {
-    pub fn start(settings: Settings, tools_dir: PathBuf, waker: Waker) -> Self {
+    pub fn start(cfg: EngineConfig, waker: Waker) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             waker,
@@ -115,10 +198,10 @@ impl Engine {
                     .enable_all()
                     .build()
                     .expect("tokio runtime");
-                rt.block_on(Core::new(settings, Tools::new(tools_dir), sh, rx).run());
+                rt.block_on(Core::new(cfg, sh, rx).run());
                 // Blocking tool jobs notice the cancel flag; do not wait on them for long.
                 crate::net::cancel_all();
-                rt.shutdown_timeout(std::time::Duration::from_secs(2));
+                rt.shutdown_timeout(Duration::from_secs(2));
             })
             .expect("engine thread");
         Self {
@@ -148,43 +231,96 @@ impl Drop for Engine {
 
 enum Done {
     Tools,
+    Download(i64, u64, downloads::Outcome),
+    Analysis(u64, Result<Arc<Analysis>, String>),
+    Validation(String, Result<(), String>),
+    Expanded(String, Result<Vec<NewItem>, String>),
+    Scan(Result<Vec<downloads::ScanChange>, String>),
+}
+
+/// A running download: its run number (to tell restarts apart) and its stop signal.
+struct Running {
+    run: u64,
+    stop: oneshot::Sender<StopReason>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopReason {
+    Pause,
+    Cancel,
 }
 
 struct Core {
     settings: Settings,
     tools: Arc<Tools>,
     shared: Arc<Shared>,
+    db: Option<Db>,
+    thumbs_dir: PathBuf,
+    subs_dir: PathBuf,
     rx: mpsc::UnboundedReceiver<Cmd>,
     done_tx: mpsc::UnboundedSender<Done>,
     done_rx: mpsc::UnboundedReceiver<Done>,
-    tools_busy: bool,
-    tool_queue: std::collections::VecDeque<ToolJob>,
+    tools_busy: Option<ToolJob>,
+    tool_queue: VecDeque<ToolJob>,
     /// Auto-install the update found by the current check.
     pending_auto: bool,
+    running: HashMap<i64, Running>,
+    next_run: u64,
+    /// Items whose process was told to stop but has not exited yet.
+    stopping: HashSet<i64>,
+    /// Final file names of paused items, to clean up partial files if they are cancelled.
+    partials: HashMap<i64, String>,
+    /// Items to remove from the queue once their process has stopped.
+    remove_after_stop: Vec<i64>,
+    analysis_gen: u64,
+    analysis_task: Option<tokio::task::JoinHandle<()>>,
+    warned_no_ffmpeg: bool,
+    scanning: bool,
+    db_path: PathBuf,
+    /// Analysis requested while yt-dlp was still being installed.
+    deferred_analysis: Option<String>,
 }
 
 impl Core {
-    fn new(
-        settings: Settings,
-        tools: Tools,
-        shared: Arc<Shared>,
-        rx: mpsc::UnboundedReceiver<Cmd>,
-    ) -> Self {
+    fn new(cfg: EngineConfig, shared: Arc<Shared>, rx: mpsc::UnboundedReceiver<Cmd>) -> Self {
         let (done_tx, done_rx) = mpsc::unbounded_channel();
+        let db = match Db::open(&cfg.db_path) {
+            Ok(db) => Some(db),
+            Err(e) => {
+                shared
+                    .update(|s| s.notify(Level::Error, format!("Could not open the library: {e}")));
+                None
+            }
+        };
         Self {
-            settings,
-            tools: Arc::new(tools),
+            settings: cfg.settings,
+            tools: Arc::new(Tools::new(cfg.tools_dir)),
             shared,
+            db,
+            thumbs_dir: cfg.thumbs_dir,
+            subs_dir: cfg.subs_dir,
             rx,
             done_tx,
             done_rx,
-            tools_busy: false,
-            tool_queue: Default::default(),
+            tools_busy: None,
+            tool_queue: VecDeque::new(),
             pending_auto: false,
+            running: HashMap::new(),
+            next_run: 0,
+            stopping: HashSet::new(),
+            partials: HashMap::new(),
+            remove_after_stop: Vec::new(),
+            analysis_gen: 0,
+            analysis_task: None,
+            warned_no_ffmpeg: false,
+            scanning: false,
+            db_path: cfg.db_path.clone(),
+            deferred_analysis: None,
         }
     }
 
     async fn run(mut self) {
+        self.load_queue_and_presets();
         self.refresh_tools().await;
         if self.ytdlp_overridden() {
             // A user-supplied yt-dlp is never updated by the app.
@@ -199,6 +335,7 @@ impl Core {
         {
             self.spawn_tool_job(ToolJob::InstallFfmpeg);
         }
+        self.pump();
         loop {
             let next = self.next_update_check();
             let sleep = tokio::time::sleep_until(next);
@@ -207,18 +344,9 @@ impl Core {
                     None | Some(Cmd::Shutdown) => break,
                     Some(cmd) => self.handle(cmd).await,
                 },
-                Some(done) = self.done_rx.recv() => match done {
-                    Done::Tools => {
-                        self.tools_busy = false;
-                        self.refresh_tools().await;
-                        self.after_check();
-                        if let Some(job) = self.tool_queue.pop_front() {
-                            self.spawn_tool_job(job);
-                        }
-                    }
-                },
+                Some(done) = self.done_rx.recv() => self.on_done(done).await,
                 _ = sleep => {
-                    if self.settings.auto_update && !self.tools_busy && !self.ytdlp_overridden() {
+                    if self.settings.auto_update && self.tools_busy.is_none() && !self.ytdlp_overridden() {
                         self.pending_auto = true;
                         self.spawn_tool_job(ToolJob::Check);
                     } else {
@@ -227,6 +355,91 @@ impl Core {
                     }
                 }
             }
+        }
+        // Stop downloads; they resume on the next start. Give the tasks a moment to kill
+        // their process trees (dropping them would too, via the process guards).
+        let mut waiting = self.running.len();
+        for (_, r) in self.running.drain() {
+            let _ = r.stop.send(StopReason::Pause);
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while waiting > 0 {
+            match tokio::time::timeout_at(deadline, self.done_rx.recv()).await {
+                Ok(Some(Done::Download(..))) => waiting -= 1,
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        if let Some(db) = &self.db {
+            let _ = db.reset_running();
+        }
+    }
+
+    async fn on_done(&mut self, done: Done) {
+        match done {
+            Done::Tools => {
+                self.tools_busy = None;
+                self.refresh_tools().await;
+                self.after_check();
+                self.next_tool_job();
+                self.pump();
+                if self.tools_busy.is_none()
+                    && let Some(url) = self.deferred_analysis.take()
+                {
+                    self.analyse(url);
+                }
+            }
+            Done::Download(id, run, outcome) => {
+                self.finish_download(id, run, outcome);
+                if self.running.is_empty() {
+                    self.next_tool_job();
+                }
+                self.pump();
+            }
+            Done::Analysis(generation, result) => {
+                if generation == self.analysis_gen {
+                    self.shared.update(|s| {
+                        if let Some(a) = s.analysis.as_mut() {
+                            a.busy = false;
+                            a.result = Some(result);
+                        }
+                    });
+                }
+            }
+            Done::Expanded(url, result) => {
+                self.shared
+                    .update(|s| s.expanding = s.expanding.saturating_sub(1));
+                match result {
+                    Ok(items) => self.enqueue(items),
+                    Err(e) => self
+                        .shared
+                        .update(|s| s.notify(Level::Error, format!("{url}: {e}"))),
+                }
+            }
+            Done::Scan(result) => match result {
+                Ok(changes) => self.apply_scan(changes),
+                Err(e) => {
+                    self.scanning = false;
+                    self.shared
+                        .update(|s| s.notify(Level::Error, format!("Library check failed: {e}")));
+                }
+            },
+            Done::Validation(args, result) => {
+                self.shared.update(|s| {
+                    if s.validation.as_ref().is_some_and(|(a, _)| *a == args) {
+                        s.validation = Some((args, Some(result)));
+                    }
+                });
+            }
+        }
+    }
+
+    fn next_tool_job(&mut self) {
+        if self.tools_busy.is_some() {
+            return;
+        }
+        if let Some(job) = self.tool_queue.pop_front() {
+            self.spawn_tool_job(job);
         }
     }
 
@@ -238,7 +451,7 @@ impl Core {
         let last = self.shared.lock().tools.last_check;
         let interval = self.settings.update_interval_hours.max(1) as i64 * 3600;
         let due = (last + interval - unix_now()).clamp(60, interval);
-        tokio::time::Instant::now() + std::time::Duration::from_secs(due as u64)
+        tokio::time::Instant::now() + Duration::from_secs(due as u64)
     }
 
     /// After an automatic check, install the update if one was found.
@@ -273,6 +486,7 @@ impl Core {
                 let tools_changed = s.ytdlp_path != self.settings.ytdlp_path
                     || s.ffmpeg_path != self.settings.ffmpeg_path;
                 let channel_changed = s.ytdlp_channel != self.settings.ytdlp_channel;
+                let more_slots = s.concurrency > self.settings.concurrency;
                 self.settings = *s;
                 if tools_changed {
                     self.refresh_tools().await;
@@ -281,217 +495,53 @@ impl Core {
                     self.shared.update(|s| s.tools.ytdlp_latest = None);
                     self.spawn_tool_job(ToolJob::Check);
                 }
-            }
-            Cmd::Shutdown => {}
-        }
-    }
-
-    /// Re-reads installed tools and their versions.
-    async fn refresh_tools(&mut self) {
-        let tools = self.tools.clone();
-        let (yo, fo) = (
-            self.settings.ytdlp_path.clone(),
-            self.settings.ffmpeg_path.clone(),
-        );
-        let res = tokio::task::spawn_blocking(move || {
-            let paths = tools.resolve(&yo, &fo);
-            let st = tools.load_state();
-            let ytdlp_managed = paths.ytdlp.is_some() && paths.ytdlp == tools.managed_ytdlp();
-            let ffmpeg_managed = paths.ffmpeg.is_some() && paths.ffmpeg == tools.managed_ffmpeg();
-            let ytdlp_version = st
-                .ytdlp
-                .as_ref()
-                .filter(|_| ytdlp_managed)
-                .map(|i| i.version.clone())
-                .or_else(|| {
-                    paths
-                        .ytdlp
-                        .as_ref()
-                        .and_then(|p| crate::tools::exe_version(p, "--version"))
-                });
-            let ffmpeg_version = st
-                .ffmpeg
-                .as_ref()
-                .filter(|_| ffmpeg_managed)
-                .map(|i| i.version.clone())
-                .or_else(|| {
-                    paths.ffmpeg.as_ref().and_then(|p| {
-                        crate::tools::exe_version(p, "-version")
-                            .map(|l| crate::tools::short_ffmpeg_version(&l))
-                    })
-                });
-            let view = ToolsView {
-                ytdlp_version,
-                ytdlp_channel: st.ytdlp.as_ref().map(|i| i.channel),
-                ytdlp_managed,
-                ytdlp_prev: tools
-                    .has_prev("yt-dlp")
-                    .then(|| st.ytdlp_prev.as_ref().map(|i| i.version.clone()))
-                    .flatten(),
-                ffmpeg_version,
-                ffmpeg_managed,
-                ffmpeg_prev: tools
-                    .has_prev("ffmpeg")
-                    .then(|| st.ffmpeg_prev.as_ref().map(|i| i.version.clone()))
-                    .flatten(),
-                last_check: st.last_check,
-                ..Default::default()
-            };
-            (paths, view)
-        })
-        .await;
-        if let Ok((paths, view)) = res {
-            self.shared.update(|s| {
-                let old = std::mem::take(&mut s.tools);
-                s.tools = ToolsView {
-                    ytdlp_latest: old.ytdlp_latest,
-                    ffmpeg_latest: old.ffmpeg_latest,
-                    busy: old.busy,
-                    error: old.error,
-                    last_check: view.last_check.max(old.last_check),
-                    ..view
-                };
-                s.paths = paths;
-            });
-        }
-    }
-
-    fn spawn_tool_job(&mut self, job: ToolJob) {
-        if self.tools_busy {
-            if !self.tool_queue.contains(&job) {
-                self.tool_queue.push_back(job);
-            }
-            return;
-        }
-        self.tools_busy = true;
-        let tools = self.tools.clone();
-        let shared = self.shared.clone();
-        let done = self.done_tx.clone();
-        let channel = self.settings.ytdlp_channel;
-        let check_ffmpeg = self.shared.lock().tools.ffmpeg_managed;
-        shared.update(|s| {
-            if matches!(job, ToolJob::Check) {
-                // Count the attempt, so an offline check retries after the interval, not at once.
-                s.tools.last_check = unix_now();
-            }
-            s.tools.error = None;
-            s.tools.busy = Some(Job {
-                label: job.label().into(),
-                ..Default::default()
-            });
-        });
-        tokio::task::spawn_blocking(move || {
-            let progress = |label: &str, d: u64, t: Option<u64>| {
-                shared.update(|s| {
-                    s.tools.busy = Some(Job {
-                        label: label.to_owned(),
-                        done: d,
-                        total: t,
-                    })
-                });
-            };
-            let result = job.run(&tools, channel, check_ffmpeg, &progress, &shared);
-            shared.update(|s| {
-                s.tools.busy = None;
-                match result {
-                    Ok(Some(msg)) => s.notify(Level::Info, msg),
-                    Ok(None) => {}
-                    Err(e) => {
-                        s.tools.error = Some(e.to_string());
-                        s.notify(Level::Error, format!("{}: {e}", job.label()));
-                    }
+                if more_slots || tools_changed {
+                    self.pump();
                 }
-            });
-            let _ = done.send(Done::Tools);
-        });
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum ToolJob {
-    Check,
-    InstallYtdlp,
-    RollbackYtdlp,
-    InstallFfmpeg,
-    RollbackFfmpeg,
-}
-
-impl ToolJob {
-    fn label(self) -> &'static str {
-        match self {
-            ToolJob::Check => "Checking for updates",
-            ToolJob::InstallYtdlp => "Updating yt-dlp",
-            ToolJob::RollbackYtdlp => "Rolling back yt-dlp",
-            ToolJob::InstallFfmpeg => "Installing ffmpeg",
-            ToolJob::RollbackFfmpeg => "Rolling back ffmpeg",
-        }
-    }
-
-    fn run(
-        self,
-        tools: &Tools,
-        channel: Channel,
-        check_ffmpeg: bool,
-        progress: crate::tools::Progress,
-        shared: &Shared,
-    ) -> crate::error::Result<Option<String>> {
-        match self {
-            ToolJob::Check => {
-                let info = tools.check_ytdlp(channel)?;
-                let mut st = tools.load_state();
-                st.last_check = unix_now();
-                tools.save_state(&st)?;
-                let ff = if check_ffmpeg {
-                    match tools.check_ffmpeg() {
-                        Ok(i) => Some(i),
-                        Err(e) => {
-                            shared.update(|s| {
-                                s.notify(Level::Error, format!("ffmpeg update check: {e}"))
-                            });
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                let msg = if info.available {
-                    format!("yt-dlp {} is available", info.latest)
-                } else {
-                    "yt-dlp is up to date".to_owned()
-                };
-                shared.update(|s| {
-                    s.tools.ytdlp_latest = Some(info);
-                    s.tools.ffmpeg_latest = ff;
-                    s.tools.last_check = st.last_check;
-                });
-                Ok(Some(msg))
             }
-            ToolJob::InstallYtdlp => {
-                let i = tools.install_ytdlp(channel, progress)?;
-                shared.update(|s| {
-                    if let Some(l) = s.tools.ytdlp_latest.as_mut() {
-                        l.available = false;
-                    }
-                });
-                Ok(Some(format!(
-                    "yt-dlp {} ({}) installed",
-                    i.version,
-                    i.channel.label()
-                )))
+            Cmd::Analyse(url) => self.analyse(url),
+            Cmd::ClearAnalysis => self.cancel_analysis(),
+            Cmd::Enqueue(items) => self.enqueue(items),
+            Cmd::QuickAdd { urls, template } => self.quick_add(urls, template),
+            Cmd::ScanFiles => self.scan_files(),
+            Cmd::DeleteEntries { ids, delete_files } => self.delete_entries(ids, delete_files),
+            Cmd::Redownload(id) => self.redownload(id),
+            Cmd::Pause(id) => self.pause(id),
+            Cmd::Resume(id) | Cmd::Retry(id) => self.resume(id),
+            Cmd::Cancel(id) => self.cancel(id),
+            Cmd::Remove(id) => self.remove(id),
+            Cmd::Move(id, to) => self.move_item(id, to),
+            Cmd::PauseAll => {
+                let ids: Vec<i64> = self
+                    .shared
+                    .lock()
+                    .queue
+                    .iter()
+                    .filter(|q| q.status.is_active())
+                    .map(|q| q.id)
+                    .collect();
+                for id in ids {
+                    self.pause(id);
+                }
             }
-            ToolJob::RollbackYtdlp => {
-                tools.rollback_ytdlp()?;
-                Ok(Some("Rolled back to the previous yt-dlp".into()))
+            Cmd::ResumeAll => {
+                let ids: Vec<i64> = self
+                    .shared
+                    .lock()
+                    .queue
+                    .iter()
+                    .filter(|q| q.status == crate::db::Status::Paused)
+                    .map(|q| q.id)
+                    .collect();
+                for id in ids {
+                    self.resume(id);
+                }
             }
-            ToolJob::InstallFfmpeg => {
-                let i = tools.install_ffmpeg(progress)?;
-                shared.update(|s| s.tools.ffmpeg_latest = None);
-                Ok(Some(format!("ffmpeg {} installed", i.version)))
-            }
-            ToolJob::RollbackFfmpeg => {
-                tools.rollback_ffmpeg()?;
-                Ok(Some("Rolled back to the previous ffmpeg".into()))
-            }
+            Cmd::ClearFinished => self.clear_finished(),
+            Cmd::SavePreset { old_name, preset } => self.save_preset(old_name, preset),
+            Cmd::DeletePreset(name) => self.delete_preset(&name),
+            Cmd::ValidateArgs(args) => self.validate_args(args),
+            Cmd::Shutdown => {}
         }
     }
 }
