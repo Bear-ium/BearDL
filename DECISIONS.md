@@ -12,3 +12,12 @@
 - **Cold start is measured from launch to the second painted frame**, using wall-clock timestamps written by `BEARDL_STARTUP_LOG`. Process teardown is excluded: the GL driver takes ~700 ms to unload. About 200 ms of the 233 ms baseline is window and GL context creation, which egui cannot avoid.
 - **Idle memory is ~70 MiB private at baseline.** Nearly all of it is the OpenGL driver (NVIDIA). The app's own heap is a few MiB.
 - **M0 review folded into M1's.** The M0 diff is a 100-line scaffold, so its review runs together with M1's.
+- **yt-dlp uses the PyInstaller "onedir" zip builds** (`yt-dlp_win.zip`, `yt-dlp_macos.zip`, `yt-dlp_linux.zip`). Every yt-dlp run is a new process, and the single-file builds unpack about 25 MB to a temp folder on each launch. If an archive can't be extracted (Linux with no bsdtar, unzip or python3), the single-file asset is installed instead.
+- **Updates resolve the release tag once** and fetch checksums and asset from `releases/download/<tag>/`. Nightly and master publish often, so separate `latest` lookups could mix releases.
+- **Rollback pins the build.** The checksum of the build rolled back from is stored as `rejected_sha`, and auto-update skips it until a newer release appears.
+- **ffmpeg comes from PATH when present.** It is downloaded only when missing, on first run or with the button, and is never auto-updated (about 140 MB). A newer build is shown when the managed copy is out of date.
+- **M1 review follow-ups.** The fixes in this commit cover: shutdown hang, curl stall timeouts, rollback pinning, single-tag resolution, safe rotate, path fields applying on blur, channel-change check, first-run ffmpeg, onefile fallback, atomic state file, and the messages. Deferred:
+  - Unused deps are scheduled: `serde_json` and tokio `io-util` arrive in M2, the windows-sys features in M7.
+  - The extra HEAD request per tool download is kept for progress totals, since it happens only on tool updates.
+  - Skipping auto-install while downloads run lands in M2 with the queue.
+- **M1 cold start.** In-process time to the second frame is unchanged from M0 (~240 ms). The external figure varies by ±50 ms with process loading and Defender scanning of the larger exe.
