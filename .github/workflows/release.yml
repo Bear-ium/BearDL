@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: beardl-windows-x86_64.zip
+          - os: ubuntu-latest
+            asset: beardl-linux-x86_64.tar.gz
+          - os: macos-latest
+            asset: beardl-macos-aarch64.tar.gz
+          - os: macos-15-intel
+            asset: beardl-macos-x86_64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the tag matches Cargo.toml
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      # No system packages are needed: the window system, OpenGL, the tray and libmpv are
+      # loaded at runtime, and SQLite is compiled in.
+      - run: cargo build --release --locked
+      - run: cargo test --locked
+
+      # Apple Silicon only runs signed code; the linker's ad-hoc signature must survive `strip`.
+      - name: Check the ad-hoc signature
+        if: runner.os == 'macOS'
+        run: codesign --verify --verbose target/release/beardl
+
+      - name: Package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/beardl.exe, LICENSE, README.md -DestinationPath ${{ matrix.asset }}
+
+      - name: Package
+        if: runner.os != 'Windows'
+        run: |
+          mkdir beardl
+          cp target/release/beardl LICENSE README.md beardl/
+          tar -czf ${{ matrix.asset }} beardl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum beardl-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY"
+          --title "BearDL $GITHUB_REF_NAME"
+          --generate-notes
+          --verify-tag
