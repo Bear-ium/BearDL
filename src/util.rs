@@ -261,6 +261,12 @@ pub fn split_args(s: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// `1 video`, `2 videos`.
+pub fn plural(n: impl Into<u64>, one: &str, many: &str) -> String {
+    let n = n.into();
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// Opens a file or folder with the system handler.
 pub fn open_path(p: &Path) -> std::io::Result<()> {
     #[cfg(windows)]

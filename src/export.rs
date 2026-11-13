@@ -183,9 +183,49 @@ pub fn is_safe_relative(s: &str) -> bool {
     let p = Path::new(t);
     !p.is_absolute()
         && !p.has_root()
-        && !t.starts_with(['/', '\\'])
+        && !t.starts_with(['/', '\\', '~'])
+        && !t.contains('$')
         && !(t.len() >= 2 && t.as_bytes()[1] == b':')
         && !t.split(['/', '\\']).any(|c| c.trim() == "..")
+        && plain_template_fields(t)
+}
+
+/// yt-dlp expands environment variables (`%VAR%`, `$VAR`) and template replacements
+/// (`%(field&text|default)s`) in paths. Imported values may only use `%%` and plain
+/// `%(field)x` fields, so nothing can expand into a path outside the download folder.
+fn plain_template_fields(t: &str) -> bool {
+    let b = t.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        match b.get(i + 1) {
+            Some(b'%') => i += 2,
+            Some(b'(') => {
+                let Some(close) = t[i + 2..].find(')') else {
+                    return false;
+                };
+                let field = &t[i + 2..i + 2 + close];
+                if field.is_empty()
+                    || !field
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b','))
+                {
+                    return false;
+                }
+                // The conversion letter after `)`.
+                let conv = b.get(i + 3 + close);
+                if !conv.is_some_and(|c| c.is_ascii_alphabetic()) {
+                    return false;
+                }
+                i += close + 4;
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// A preset name not used yet: "Name (imported)", then "Name (imported 2)", ...
@@ -582,6 +622,13 @@ mod tests {
         assert!(is_safe_relative(""));
         assert!(!is_safe_relative("../up"));
         assert!(!is_safe_relative("a/../../b"));
+        assert!(is_safe_relative("%(uploader)s/%(title)s [%(id)s].%(ext)s"));
+        assert!(is_safe_relative("100%% fun"));
+        assert!(!is_safe_relative("%APPDATA%/x"));
+        assert!(!is_safe_relative("$HOME/x"));
+        assert!(!is_safe_relative("~/x"));
+        assert!(!is_safe_relative("%(id&../../x|)s"));
+        assert!(!is_safe_relative("%(title"));
         assert!(!is_safe_relative("/etc"));
         assert!(!is_safe_relative("C:\\Users\\x"));
         assert!(!is_safe_relative("\\\\host\\share"));

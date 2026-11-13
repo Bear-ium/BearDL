@@ -1,7 +1,9 @@
 mod downloads_view;
 pub mod fonts;
 mod library_view;
+mod player_view;
 mod presets_view;
+mod search_view;
 mod settings_view;
 #[cfg(feature = "dev-shots")]
 mod shots;
@@ -60,6 +62,8 @@ pub struct App {
     page: Page,
     dl: downloads_view::DownloadsUi,
     lib: library_view::LibraryUi,
+    player_ui: player_view::PlayerUi,
+    search: search_view::SearchUi,
     presets: presets_view::PresetsUi,
     toasts: Vec<Toast>,
     bench_exit: bool,
@@ -109,6 +113,11 @@ impl App {
             page: Page::Downloads,
             dl: Default::default(),
             lib: Default::default(),
+            search: Default::default(),
+            player_ui: player_view::PlayerUi {
+                gl_proc: cc.get_proc_address.clone(),
+                ..Default::default()
+            },
             presets: Default::default(),
             toasts: Vec::new(),
             bench_exit,
@@ -173,6 +182,13 @@ impl App {
             if let Some(p) = s.page.as_deref().and_then(Page::from_name) {
                 self.page = p;
             }
+            if let Some(q) = s.search.clone() {
+                self.search.dev_set(&q);
+            }
+            if s.play_first {
+                self.lib.dev_play_first = true;
+                self.lib.dev_select_first = true;
+            }
             if s.select_first {
                 self.lib.dev_select_first = true;
                 self.lib.quick_view = true;
@@ -200,12 +216,9 @@ impl App {
     }
 
     /// Plays a library entry, optionally from a position in seconds.
-    pub(crate) fn play(&mut self, d: &crate::db::Download, _start: Option<f64>) {
-        let p = std::path::Path::new(&d.file_path);
-        if p.is_file() {
-            if let Err(e) = crate::util::open_path(p) {
-                self.push_toast(Level::Error, format!("Could not open the file: {e}"));
-            }
+    pub(crate) fn play(&mut self, d: &crate::db::Download, start: Option<f64>) {
+        if std::path::Path::new(&d.file_path).is_file() {
+            self.player_ui.pending = Some((std::sync::Arc::new(d.clone()), start));
         } else {
             self.push_toast(Level::Error, "The file is missing".into());
         }
@@ -308,8 +321,41 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.drive_player(ctx, frame);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let immersive = self.player_ui.fullscreen && self.page == Page::Player;
+        if !immersive {
+            self.side_panels(ui);
+        }
+        egui::CentralPanel::default_margins().show(ui, |ui| match self.page {
+            Page::Settings => settings_view::show(self, ui),
+            Page::Downloads => downloads_view::show(self, ui),
+            Page::Library => library_view::show(self, ui),
+            Page::Player => player_view::show(self, ui, frame),
+            Page::Search => search_view::show(self, ui),
+            other => {
+                ui.heading(other.label());
+                ui.weak("Coming in a later milestone.");
+            }
+        });
+        self.after_frame(&ctx);
+    }
+
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        self.save_resume();
+        if let (Some(p), Some(gl)) = (self.player_ui.player.as_mut(), gl) {
+            p.free_gl(gl);
+        }
+        self.player_ui.player = None;
+    }
+}
+
+impl App {
+    fn side_panels(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("nav")
             .resizable(false)
             .exact_size(170.0)
@@ -329,15 +375,10 @@ impl eframe::App for App {
         egui::Panel::bottom("status")
             .exact_size(26.0)
             .show(ui, |ui| self.status_bar(ui));
-        egui::CentralPanel::default_margins().show(ui, |ui| match self.page {
-            Page::Settings => settings_view::show(self, ui),
-            Page::Downloads => downloads_view::show(self, ui),
-            Page::Library => library_view::show(self, ui),
-            other => {
-                ui.heading(other.label());
-                ui.weak("Coming in a later milestone.");
-            }
-        });
+    }
+
+    fn after_frame(&mut self, ctx: &egui::Context) {
+        let ctx = ctx.clone();
         self.show_toasts(&ctx);
         let (imported, themes_rev) = {
             let mut st = self.engine.state();

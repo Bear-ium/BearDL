@@ -68,6 +68,8 @@ pub enum Cmd {
     },
     DeletePreset(String),
     ValidateArgs(String),
+    /// Playback position to resume from next time.
+    SaveResume(i64, f64),
     Export {
         path: PathBuf,
         settings: Box<Settings>,
@@ -609,6 +611,11 @@ impl Core {
             Cmd::SavePreset { old_name, preset } => self.save_preset(old_name, preset),
             Cmd::DeletePreset(name) => self.delete_preset(&name),
             Cmd::ValidateArgs(args) => self.validate_args(args),
+            Cmd::SaveResume(id, pos) => {
+                if let Some(db) = &self.db {
+                    let _ = db.set_resume(id, pos);
+                }
+            }
             Cmd::Export { path, settings } => self.export(&path, &settings),
             Cmd::Import {
                 path,

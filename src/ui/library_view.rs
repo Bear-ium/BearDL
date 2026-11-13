@@ -46,11 +46,12 @@ pub struct LibraryUi {
     scroll_offset: f32,
     /// Development screenshots: select the first row once the list is loaded.
     pub dev_select_first: bool,
+    pub dev_play_first: bool,
 }
 
 impl LibraryUi {
     /// The UI keeps its own read connection, opened on first use to keep start-up fast.
-    fn db(&mut self) -> Option<&Db> {
+    pub(crate) fn db(&mut self) -> Option<&Db> {
         if self.db.is_none() && self.db_error.is_none() {
             match Db::open(&crate::paths::db_path()) {
                 Ok(db) => self.db = Some(db),
@@ -208,6 +209,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.lib.dev_select_first && app.lib.count > 0 {
         app.lib.dev_select_first = false;
         app.lib.select(0);
+        if app.lib.dev_play_first
+            && let Some(d) = app.lib.detail.as_ref().map(|d| d.d.clone())
+        {
+            app.lib.dev_play_first = false;
+            app.play(&d, None);
+        }
     }
     if !typing {
         keyboard(app, ui);

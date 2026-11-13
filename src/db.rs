@@ -280,6 +280,15 @@ pub fn fts_query(text: &str) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" "))
 }
 
+/// A subtitle track to index: language, whether it is automatic, file path and cues.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubTrack {
+    pub lang: String,
+    pub is_auto: bool,
+    pub path: String,
+    pub cues: Vec<Cue>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueHit {
     pub download_id: i64,
@@ -731,6 +740,76 @@ impl Db {
         Ok(())
     }
 
+    /// Replaces the subtitle index of a download: its tracks and every cue, in one
+    /// transaction. Returns the number of cues stored.
+    pub fn store_subtitles(&mut self, download_id: i64, tracks: &[SubTrack]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM cues WHERE download_id = ?1", [download_id])?;
+        tx.execute(
+            "DELETE FROM sub_tracks WHERE download_id = ?1",
+            [download_id],
+        )?;
+        let mut n = 0;
+        {
+            let mut ins_track = tx.prepare(
+                "INSERT INTO sub_tracks(download_id, lang, is_auto, path) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            let mut ins_cue = tx.prepare(
+                "INSERT INTO cues(text, download_id, track_id, start, end) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for t in tracks {
+                ins_track.execute(params![download_id, t.lang, t.is_auto, t.path])?;
+                let track_id = tx.last_insert_rowid();
+                for c in &t.cues {
+                    ins_cue.execute(params![c.text, download_id, track_id, c.start, c.end])?;
+                    n += 1;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Subtitle files kept for a download (to delete with it).
+    pub fn sub_track_paths(&self, download_id: i64) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT path FROM sub_tracks WHERE download_id = ?1")?;
+        let rows = st.query_map([download_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Searches spoken words. `fts` is an FTS5 query (see `subtitles::cue_query`). Results
+    /// are ranked; the snippet marks matches with \u{2} ... \u{3}.
+    pub fn search_cues(&self, fts: &str, limit: usize) -> Result<Vec<CueHit>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT c.download_id, d.title, d.channel, c.start, \
+             snippet(cues, 0, char(2), char(3), '…', 14) \
+             FROM cues c JOIN downloads d ON d.id = c.download_id \
+             WHERE cues MATCH ?1 ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![fts, limit as i64], |r| {
+            Ok(CueHit {
+                download_id: r.get(0)?,
+                title: r.get(1)?,
+                channel: r.get(2)?,
+                start: r.get(3)?,
+                snippet: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// (indexed downloads, cues) for the search page.
+    pub fn cue_stats(&self) -> Result<(i64, i64)> {
+        Ok(self.conn.query_row(
+            "SELECT (SELECT COUNT(DISTINCT download_id) FROM sub_tracks), \
+             (SELECT COUNT(*) FROM sub_tracks)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
     pub fn clear_presets(&self) -> Result<()> {
         self.conn.execute("DELETE FROM presets", [])?;
         Ok(())
@@ -838,6 +917,57 @@ mod tests {
         assert_eq!(db.library_count(&q("brand")).unwrap(), 1);
         db.delete_download(id).unwrap();
         assert_eq!(db.library_count(&q("brand")).unwrap(), 0);
+    }
+
+    #[test]
+    fn subtitle_index_and_search() {
+        let mut db = Db::open_memory().unwrap();
+        let id = db.insert_download(&dl("Zoo video", Status::Done)).unwrap();
+        let other = db.insert_download(&dl("Other", Status::Done)).unwrap();
+        let track = |lang: &str, text: &[(&str, f64)]| SubTrack {
+            lang: lang.into(),
+            is_auto: false,
+            path: format!("/subs/{lang}.vtt"),
+            cues: text
+                .iter()
+                .map(|(t, s)| Cue {
+                    start: *s,
+                    end: s + 2.0,
+                    text: (*t).into(),
+                })
+                .collect(),
+        };
+        let n = db
+            .store_subtitles(
+                id,
+                &[track(
+                    "en",
+                    &[
+                        ("all right so here we are", 1.0),
+                        ("in front of the elephants", 4.5),
+                    ],
+                )],
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        db.store_subtitles(other, &[track("en", &[("elephants are big", 9.0)])])
+            .unwrap();
+        let hits = db.search_cues("\"elephant\"*", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        let zoo = hits.iter().find(|h| h.download_id == id).unwrap();
+        assert_eq!(zoo.start, 4.5);
+        assert_eq!(zoo.title, "Zoo video");
+        assert!(zoo.snippet.contains('\u{2}'));
+        assert_eq!(db.search_cues("\"front of the\"", 10).unwrap().len(), 1);
+        assert_eq!(db.cue_stats().unwrap(), (2, 2));
+        // Re-indexing replaces; deleting the download removes its cues.
+        db.store_subtitles(id, &[track("de", &[("hallo", 0.0)])])
+            .unwrap();
+        assert_eq!(db.search_cues("\"elephant\"*", 10).unwrap().len(), 1);
+        assert_eq!(db.sub_track_paths(id).unwrap(), vec!["/subs/de.vtt"]);
+        db.delete_downloads(&[other]).unwrap();
+        assert!(db.search_cues("\"elephant\"*", 10).unwrap().is_empty());
+        assert_eq!(db.cue_stats().unwrap(), (1, 1));
     }
 
     #[test]

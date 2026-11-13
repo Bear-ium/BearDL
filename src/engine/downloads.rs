@@ -706,7 +706,7 @@ impl Core {
                                 q.progress.stage.clear();
                             }
                         });
-                        self.after_download(id, thumb.as_deref(), subs);
+                        self.after_download(id, meta.as_ref(), subs);
                     }
                 }
                 self.shared.update(|s| s.library_rev += 1);
@@ -719,7 +719,11 @@ impl Core {
     }
 
     /// Post-download work off the engine thread: the small list thumbnail.
-    fn after_download(&mut self, id: i64, _thumb: Option<&str>, _subs: Option<Value>) {
+    fn after_download(&mut self, id: i64, meta: Option<&Meta>, subs: Option<Value>) {
+        let tracks = subtitle_files(&self.subs_dir, meta, subs.as_ref());
+        if !tracks.is_empty() {
+            self.index_subtitles(id, tracks);
+        }
         let ffmpeg = self.shared.lock().paths.ffmpeg.clone();
         let thumb = self
             .db
@@ -738,6 +742,36 @@ impl Core {
                 });
             }
         }
+    }
+
+    /// Parses subtitle files and stores every cue in the full-text index, off the engine
+    /// thread with its own connection.
+    fn index_subtitles(&mut self, id: i64, files: Vec<(String, PathBuf)>) {
+        let db_path = self.db_path.clone();
+        let shared = self.shared.clone();
+        tokio::task::spawn_blocking(move || {
+            let tracks: Vec<crate::db::SubTrack> = files
+                .into_iter()
+                .filter_map(|(lang, path)| {
+                    let cues = crate::subtitles::parse_file(&path)?;
+                    Some(crate::db::SubTrack {
+                        is_auto: lang.ends_with("-orig") || lang.contains("auto"),
+                        lang,
+                        path: path.to_string_lossy().into_owned(),
+                        cues,
+                    })
+                })
+                .collect();
+            if tracks.is_empty() {
+                return;
+            }
+            let res =
+                crate::db::Db::open(&db_path).and_then(|mut db| db.store_subtitles(id, &tracks));
+            if let Err(e) = res {
+                shared
+                    .update(|s| s.notify(Level::Error, format!("Could not index subtitles: {e}")));
+            }
+        });
     }
 
     fn store_meta(&mut self, id: i64, m: &Meta, file: Option<&str>, thumb: Option<&str>) {
@@ -799,6 +833,12 @@ impl Core {
                 let p = Path::new(&d.file_path);
                 if p.is_file() && !shared(&d.file_path) && std::fs::remove_file(p).is_err() {
                     failed += 1;
+                }
+            }
+            for p in db.sub_track_paths(id).unwrap_or_default() {
+                let p = Path::new(&p);
+                if p.starts_with(&self.subs_dir) && !shared(&p.to_string_lossy()) {
+                    let _ = std::fs::remove_file(p);
                 }
             }
             if !d.thumb_path.is_empty() && !shared(&d.thumb_path) {
@@ -914,6 +954,46 @@ impl Core {
             }
         });
     }
+}
+
+/// `(language, file)` for each subtitle yt-dlp wrote. They are written to the cache as
+/// `<extractor>-<id>.<lang>.<ext>`; yt-dlp's reported `filepath` can be stale, so the cache is
+/// read first and reported paths are only a fallback.
+pub(super) fn subtitle_files(
+    subs_dir: &Path,
+    meta: Option<&Meta>,
+    reported: Option<&Value>,
+) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(m) = meta.filter(|m| !m.id.is_empty()) {
+        let prefix = format!("{}-{}.", m.extractor_key, m.id);
+        if let Ok(rd) = std::fs::read_dir(subs_dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let Some(rest) = name.strip_prefix(&prefix) else {
+                    continue;
+                };
+                if let Some((lang, ext)) = rest.rsplit_once('.')
+                    && matches!(ext, "vtt" | "srt")
+                {
+                    out.push((lang.to_owned(), e.path()));
+                }
+            }
+        }
+    }
+    if out.is_empty()
+        && let Some(map) = reported.and_then(Value::as_object)
+    {
+        out = map
+            .iter()
+            .filter_map(|(lang, info)| {
+                let p = PathBuf::from(info.get("filepath")?.as_str()?);
+                p.is_file().then(|| (lang.clone(), p))
+            })
+            .collect();
+    }
+    out.sort();
+    out
 }
 
 #[derive(Debug, PartialEq)]
@@ -1300,6 +1380,33 @@ mod tests {
         assert!(!is_partial_of("Title [abc].flv", stem));
         assert!(!is_partial_of("Title [abc] 2.mp4.part", stem));
         assert!(!is_partial_of("Other.mp4.part", stem));
+    }
+
+    #[test]
+    fn finds_subtitle_files_in_cache() {
+        let d = std::env::temp_dir().join(format!("beardl-subs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in [
+            "Youtube-abc.en.vtt",
+            "Youtube-abc.de.srt",
+            "Youtube-abc.jpg",
+            "Youtube-abcd.en.vtt",
+        ] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        let meta = Meta {
+            id: "abc".into(),
+            extractor_key: "Youtube".into(),
+            ..Default::default()
+        };
+        let langs: Vec<String> = subtitle_files(&d, Some(&meta), None)
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        assert_eq!(langs, vec!["de", "en"]);
+        assert!(subtitle_files(&d, None, None).is_empty());
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

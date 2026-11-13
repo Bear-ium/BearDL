@@ -66,3 +66,9 @@
   - Files over 16 MiB are refused.
   - Theme write errors become warnings, not a failed import.
   - Export writes atomically. It does not ask before overwriting, since the user types the path.
+- **Embedded player.** libmpv is loaded at runtime (`libmpv-2.dll`, `libmpv.so.2` or `libmpv.2.dylib`; the app folder, `tools/mpv`, Homebrew paths and the system search path are tried, and `BEARDL_LIBMPV` overrides). mpv renders through its OpenGL render API into an FBO texture registered with egui. FLIP_Y is 0, because egui samples texture row 0 as the top. mpv's update callback requests a repaint only when a new frame exists, so a paused player is idle.
+- **The player is driven from `App::logic`.** eframe calls `logic` (not `ui`) while the window is minimised or covered, and mpv waits for each frame to be rendered, so video keeps playing when the window is hidden. `GL_BLEND` is switched off before mpv renders, because egui leaves it on.
+- **Resume positions** are saved every 15 s while playing, on pause or switch, and on exit. They are read fresh from the database at play time. Within 10 s of the end counts as finished.
+- **Without libmpv**, playback goes to an external mpv (`--start=… -- file`), else the system player, with install instructions. Metadata, thumbnails and chapters are embedded by yt-dlp at download time (`--embed-metadata --embed-thumbnail --embed-chapters`); ffprobe confirmed the tags and the attached cover.
+- **For testing only**, a libmpv build was downloaded into the session's scratch folder and pointed to with `BEARDL_LIBMPV`. It is not bundled.
+- **M5 and the start of M6 share one commit.** They touch the same UI files. M6's review fixes get their own commit.

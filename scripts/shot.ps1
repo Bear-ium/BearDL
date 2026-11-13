@@ -6,7 +6,8 @@ param(
     [string]$Url = '',
     [double]$Delay = 4,
     [string]$HomeDir = (Join-Path $env:TEMP 'beardl-measure'),
-    [switch]$Select
+    [switch]$Select,
+    [switch]$Play
 )
 Set-Location (Split-Path $PSScriptRoot -Parent)
 $env:BEARDL_HOME = $HomeDir
@@ -15,6 +16,7 @@ $env:BEARDL_SHOT_DELAY = "$Delay"
 $env:BEARDL_SHOT_PAGE = $Page
 $env:BEARDL_SHOT_URL = $Url
 if ($Select) { $env:BEARDL_SHOT_SELECT = '1' } else { $env:BEARDL_SHOT_SELECT = '' }
+if ($Play) { $env:BEARDL_SHOT_PLAY = '1' } else { $env:BEARDL_SHOT_PLAY = '' }
 $p = Start-Process -FilePath 'target/debug/beardl.exe' -PassThru
 if (-not $p.WaitForExit([int](($Delay + 30) * 1000))) {
     Stop-Process -Id $p.Id -Force

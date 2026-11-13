@@ -121,6 +121,20 @@ fn analyse_and_download() {
         assert!(!d.title.is_empty());
         assert!(d.duration.is_some());
         assert!(!d.thumb_path.is_empty(), "thumbnail cached");
+        // Captions were downloaded and every line indexed for spoken-word search.
+        let (videos, tracks) = db.cue_stats().unwrap();
+        eprintln!("indexed subtitle tracks: {tracks} in {videos} videos");
+        assert!(tracks > 0, "subtitles indexed");
+        let hits = db
+            .search_cues(&beardl::subtitles::cue_query("elephants").unwrap(), 10)
+            .unwrap();
+        eprintln!(
+            "hits for 'elephants': {:?}",
+            hits.iter()
+                .map(|h| (h.start, &h.snippet))
+                .collect::<Vec<_>>()
+        );
+        assert!(hits.iter().any(|h| h.download_id == yt.id));
     } else {
         eprintln!("YouTube download did not complete: {}", yt.error);
     }

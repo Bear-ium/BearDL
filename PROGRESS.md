@@ -9,8 +9,8 @@ Measurements on Windows 11, x86_64, release build. Cold start = launch to first 
 | M2 Download core | done | 2026-11-13 | 4.89 MiB | 276 ms | 80.7 MiB private | 0 ms / 10 s |
 | M3 Library and quick view | done | 2026-11-13 | 5.15 MiB | 265 ms | 79.6 MiB private | 0 ms / 10 s |
 | M4 Settings, themes, export | done | 2026-11-13 | 5.33 MiB | 266 ms | 80.1 MiB private | 0 ms / 10 s |
-| M5 Player and metadata | in progress | | | | | |
-| M6 Subtitle indexing | todo | | | | | |
+| M5 Player and metadata | done | 2026-11-13 | 5.37 MiB | 267 ms | 79.8 MiB private | 0 ms / 10 s |
+| M6 Subtitle indexing | in progress | | | | | |
 | M7 Subscriptions | todo | | | | | |
 | M8 Trimming | todo | | | | | |
 | M9 Hardening and size | todo | | | | | |
