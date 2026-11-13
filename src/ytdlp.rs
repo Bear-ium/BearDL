@@ -179,6 +179,10 @@ pub struct Job<'a> {
     pub has_ffmpeg: bool,
 }
 
+/// English subtitles, plus the original-language automatic captions (`<lang>-orig`), so
+/// non-English videos are indexed in what was actually said rather than a translation.
+pub const DEFAULT_SUB_LANGS: &str = "en,en-US,en-GB,.*-orig";
+
 pub const PROGRESS_PREFIX: &str = "[bdl]";
 pub const POSTPROCESS_PREFIX: &str = "[bdlpp]";
 pub const META_PREFIX: &str = "[bdlmeta]";
@@ -525,12 +529,17 @@ pub fn download_args(job: &Job) -> Vec<String> {
             o.sub_langs.trim()
         };
         push(if langs.is_empty() {
-            "en,en-US,en-GB"
+            DEFAULT_SUB_LANGS
         } else {
             langs
         });
         push("--sub-format");
         push("vtt/srt/best");
+        if job.has_ffmpeg {
+            // Whatever format was picked, the index reads VTT.
+            push("--convert-subs");
+            push("vtt");
+        }
         push("-o");
         push(&format!(
             "subtitle:{}",

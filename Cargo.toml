@@ -32,3 +32,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.191"
+
+[target."cfg(not(windows))".dependencies]
+tray-icon = { version = "0.26.1", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }

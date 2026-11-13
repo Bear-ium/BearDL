@@ -746,16 +746,17 @@ impl Core {
 
     /// Parses subtitle files and stores every cue in the full-text index, off the engine
     /// thread with its own connection.
-    fn index_subtitles(&mut self, id: i64, files: Vec<(String, PathBuf)>) {
+    fn index_subtitles(&mut self, id: i64, files: Vec<(String, PathBuf, bool)>) {
         let db_path = self.db_path.clone();
         let shared = self.shared.clone();
         tokio::task::spawn_blocking(move || {
-            let tracks: Vec<crate::db::SubTrack> = files
+            // One track per language: manual first, then the original-language captions.
+            let tracks: Vec<crate::db::SubTrack> = crate::subtitles::choose_tracks(&files)
                 .into_iter()
-                .filter_map(|(lang, path)| {
-                    let cues = crate::subtitles::parse_file(&path)?;
+                .filter_map(|(lang, path, is_auto)| {
+                    let cues = crate::subtitles::parse_file(&path, is_auto)?;
                     Some(crate::db::SubTrack {
-                        is_auto: lang.ends_with("-orig") || lang.contains("auto"),
+                        is_auto,
                         lang,
                         path: path.to_string_lossy().into_owned(),
                         cues,
@@ -767,10 +768,11 @@ impl Core {
             }
             let res =
                 crate::db::Db::open(&db_path).and_then(|mut db| db.store_subtitles(id, &tracks));
-            if let Err(e) = res {
-                shared
-                    .update(|s| s.notify(Level::Error, format!("Could not index subtitles: {e}")));
-            }
+            // Tell the UI only now, so search pages see the new cues.
+            shared.update(|s| match res {
+                Ok(_) => s.library_rev += 1,
+                Err(e) => s.notify(Level::Error, format!("Could not index subtitles: {e}")),
+            });
         });
     }
 
@@ -963,8 +965,17 @@ pub(super) fn subtitle_files(
     subs_dir: &Path,
     meta: Option<&Meta>,
     reported: Option<&Value>,
-) -> Vec<(String, PathBuf)> {
-    let mut out: Vec<(String, PathBuf)> = Vec::new();
+) -> Vec<(String, PathBuf, bool)> {
+    // Automatic captions are recognisable by their source URL (YouTube: `kind=asr`).
+    let is_auto = |lang: &str| {
+        reported
+            .and_then(|v| v.get(lang))
+            .and_then(|i| i.get("url"))
+            .and_then(Value::as_str)
+            .is_some_and(|u| u.contains("kind=asr"))
+            || lang.ends_with("-orig")
+    };
+    let mut out: Vec<(String, PathBuf, bool)> = Vec::new();
     if let Some(m) = meta.filter(|m| !m.id.is_empty()) {
         let prefix = format!("{}-{}.", m.extractor_key, m.id);
         if let Ok(rd) = std::fs::read_dir(subs_dir) {
@@ -976,7 +987,7 @@ pub(super) fn subtitle_files(
                 if let Some((lang, ext)) = rest.rsplit_once('.')
                     && matches!(ext, "vtt" | "srt")
                 {
-                    out.push((lang.to_owned(), e.path()));
+                    out.push((lang.to_owned(), e.path(), is_auto(lang)));
                 }
             }
         }
@@ -988,7 +999,7 @@ pub(super) fn subtitle_files(
             .iter()
             .filter_map(|(lang, info)| {
                 let p = PathBuf::from(info.get("filepath")?.as_str()?);
-                p.is_file().then(|| (lang.clone(), p))
+                p.is_file().then(|| (lang.clone(), p, is_auto(lang)))
             })
             .collect();
     }
@@ -1402,7 +1413,7 @@ mod tests {
         };
         let langs: Vec<String> = subtitle_files(&d, Some(&meta), None)
             .into_iter()
-            .map(|(l, _)| l)
+            .map(|(l, _, _)| l)
             .collect();
         assert_eq!(langs, vec!["de", "en"]);
         assert!(subtitle_files(&d, None, None).is_empty());

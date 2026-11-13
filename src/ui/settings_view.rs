@@ -61,7 +61,7 @@ fn general(app: &mut App, ui: &mut egui::Ui) {
             ui.label("Subtitle languages");
             ui.add(
                 egui::TextEdit::singleline(&mut s.subtitle_langs)
-                    .hint_text("en,en-US,en-GB")
+                    .hint_text(crate::ytdlp::DEFAULT_SUB_LANGS)
                     .desired_width(200.0),
             );
             ui.end_row();

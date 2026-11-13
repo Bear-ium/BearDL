@@ -8,6 +8,9 @@ use eframe::egui;
 const DELAY: f64 = 0.25;
 const LIMIT: usize = 500;
 
+/// (query generation, hits or error) from the search thread.
+type SearchResult = (u64, Result<Vec<CueHit>, String>);
+
 #[derive(Default)]
 pub struct SearchUi {
     db: Option<Db>,
@@ -19,6 +22,8 @@ pub struct SearchUi {
     groups: Vec<(i64, String, String, Vec<CueHit>)>,
     stats: Option<(i64, i64)>,
     seen_rev: Option<u64>,
+    generation: u64,
+    pending: Option<std::sync::mpsc::Receiver<SearchResult>>,
 }
 
 impl SearchUi {
@@ -39,20 +44,50 @@ impl SearchUi {
         self.db.as_ref()
     }
 
-    fn run(&mut self) {
-        self.groups.clear();
+    /// Starts the query on a worker thread with its own connection, so a slow search over
+    /// millions of cues never blocks the UI. Results arrive in `poll`.
+    fn run(&mut self, ctx: &egui::Context) {
+        self.generation += 1;
         let Some(fts) = crate::subtitles::cue_query(&self.query) else {
+            self.groups.clear();
+            self.pending = None;
             return;
         };
-        let hits = match self.db().map(|db| db.search_cues(&fts, LIMIT)) {
-            Some(Ok(h)) => h,
-            Some(Err(e)) => {
-                self.error = Some(e.to_string());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let generation = self.generation;
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("search".into())
+            .spawn(move || {
+                let res = Db::open(&crate::paths::db_path())
+                    .and_then(|db| db.search_cues(&fts, LIMIT))
+                    .map_err(|e| e.to_string());
+                let _ = tx.send((generation, res));
+                ctx.request_repaint();
+            });
+        if spawned.is_ok() {
+            self.pending = Some(rx);
+        }
+    }
+
+    fn poll(&mut self) {
+        let Some(rx) = &self.pending else { return };
+        let Ok((generation, res)) = rx.try_recv() else {
+            return;
+        };
+        self.pending = None;
+        if generation != self.generation {
+            return;
+        }
+        let hits = match res {
+            Ok(h) => h,
+            Err(e) => {
+                self.error = Some(e);
                 return;
             }
-            None => return,
         };
         self.error = None;
+        self.groups.clear();
         for h in hits {
             match self.groups.iter_mut().find(|g| g.0 == h.download_id) {
                 Some(g) => g.3.push(h),
@@ -94,11 +129,12 @@ fn snippet_job(s: &str, ui: &egui::Ui) -> egui::text::LayoutJob {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let rev = app.engine.state().library_rev;
     let s = &mut app.search;
+    s.poll();
     if s.seen_rev != Some(rev) {
         s.seen_rev = Some(rev);
         s.stats = s.db().and_then(|db| db.cue_stats().ok());
         if !s.query.is_empty() {
-            s.run();
+            s.run(ui.ctx());
         }
     }
     ui.horizontal(|ui| {
@@ -124,7 +160,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             s.edited = None;
             if s.input.trim() != s.query {
                 s.query = s.input.trim().to_owned();
-                s.run();
+                s.run(ui.ctx());
             }
         } else {
             ui.ctx()

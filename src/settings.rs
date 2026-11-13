@@ -42,7 +42,7 @@ impl Default for Settings {
             concurrency: 3,
             rate_limit: String::new(),
             default_preset: "Best video + audio".into(),
-            subtitle_langs: "en,en-US,en-GB".into(),
+            subtitle_langs: crate::ytdlp::DEFAULT_SUB_LANGS.into(),
             ytdlp_channel: Channel::Stable,
             auto_update: true,
             update_interval_hours: 24,

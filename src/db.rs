@@ -65,12 +65,14 @@ CREATE TABLE IF NOT EXISTS sub_tracks (
     download_id INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
     lang TEXT NOT NULL,
     is_auto INTEGER NOT NULL DEFAULT 0,
-    path TEXT NOT NULL
+    path TEXT NOT NULL,
+    first_cue INTEGER,
+    last_cue INTEGER
 );
 CREATE INDEX IF NOT EXISTS sub_tracks_download ON sub_tracks(download_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS cues USING fts5(
     text, download_id UNINDEXED, track_id UNINDEXED, start UNINDEXED, end UNINDEXED,
-    tokenize='unicode61 remove_diacritics 2'
+    tokenize='unicode61 remove_diacritics 2', prefix='2 3'
 );
 
 CREATE TABLE IF NOT EXISTS presets (
@@ -328,7 +330,7 @@ CREATE INDEX IF NOT EXISTS lib_duration ON downloads(duration) WHERE status != '
 CREATE INDEX IF NOT EXISTS lib_missing ON downloads(created_at) WHERE missing = 1;
 "#;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -336,9 +338,64 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(LIBRARY_INDEXES)?;
         conn.execute_batch("ANALYZE")?;
     }
+    if v < 3 {
+        // Cue rowid ranges per track (cheap deletes) and prefix indexes for short searches.
+        let has_range: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sub_tracks') WHERE name = 'first_cue'")?
+            .exists([])?;
+        if !has_range {
+            conn.execute_batch(
+                "ALTER TABLE sub_tracks ADD COLUMN first_cue INTEGER; \
+                 ALTER TABLE sub_tracks ADD COLUMN last_cue INTEGER;",
+            )?;
+        }
+        let sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'cues'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !sql.contains("prefix") {
+            conn.execute_batch(&format!(
+                "BEGIN; ALTER TABLE cues RENAME TO cues_old; {}\n\
+                 INSERT INTO cues(rowid, text, download_id, track_id, start, end) \
+                 SELECT rowid, text, download_id, track_id, start, end FROM cues_old; \
+                 DROP TABLE cues_old; COMMIT;",
+                CUES_TABLE
+            ))?;
+        }
+    }
     if v != SCHEMA_VERSION {
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     }
+    Ok(())
+}
+
+const CUES_TABLE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS cues USING fts5(\n    text, download_id UNINDEXED, track_id UNINDEXED, start UNINDEXED, end UNINDEXED,\n    tokenize='unicode61 remove_diacritics 2', prefix='2 3'\n);";
+
+/// Removes a download's cues and tracks. Tracks record the rowid range of their cues, so this
+/// deletes by range instead of scanning the index (`download_id` is not indexed in FTS5).
+fn clear_cues(conn: &Connection, download_id: i64) -> Result<()> {
+    let ranges: Vec<(Option<i64>, Option<i64>)> = {
+        let mut st = conn
+            .prepare_cached("SELECT first_cue, last_cue FROM sub_tracks WHERE download_id = ?1")?;
+        let rows = st.query_map([download_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut legacy = false;
+    for r in ranges {
+        match r {
+            (Some(a), Some(b)) => {
+                conn.prepare_cached("DELETE FROM cues WHERE rowid BETWEEN ?1 AND ?2")?
+                    .execute([a, b])?;
+            }
+            _ => legacy = true,
+        }
+    }
+    if legacy {
+        conn.execute("DELETE FROM cues WHERE download_id = ?1", [download_id])?;
+    }
+    conn.prepare_cached("DELETE FROM sub_tracks WHERE download_id = ?1")?
+        .execute([download_id])?;
     Ok(())
 }
 
@@ -458,10 +515,9 @@ impl Db {
     pub fn delete_downloads(&mut self, ids: &[i64]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
-            let mut cues = tx.prepare("DELETE FROM cues WHERE download_id = ?1")?;
             let mut rows = tx.prepare("DELETE FROM downloads WHERE id = ?1")?;
             for id in ids {
-                cues.execute([id])?;
+                clear_cues(&tx, *id)?;
                 rows.execute([id])?;
             }
         }
@@ -590,8 +646,7 @@ impl Db {
     }
 
     pub fn delete_download(&self, id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM cues WHERE download_id = ?1", [id])?;
+        clear_cues(&self.conn, id)?;
         self.conn
             .execute("DELETE FROM downloads WHERE id = ?1", [id])?;
         Ok(())
@@ -600,9 +655,10 @@ impl Db {
     /// How many rows other than `except` point at `path`. Files shared by several rows
     /// (re-downloads, re-linked files) are never deleted while still referenced.
     pub fn file_refs(&self, path: &str, except: &[i64]) -> Result<usize> {
-        let mut st = self
-            .conn
-            .prepare_cached("SELECT id FROM downloads WHERE file_path = ?1 OR thumb_path = ?1")?;
+        let mut st = self.conn.prepare_cached(
+            "SELECT id FROM downloads WHERE file_path = ?1 OR thumb_path = ?1 \
+             UNION ALL SELECT download_id FROM sub_tracks WHERE path = ?1",
+        )?;
         let ids = st.query_map([path], |r| r.get::<_, i64>(0))?;
         let mut n = 0;
         for id in ids {
@@ -744,11 +800,21 @@ impl Db {
     /// transaction. Returns the number of cues stored.
     pub fn store_subtitles(&mut self, download_id: i64, tracks: &[SubTrack]) -> Result<usize> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM cues WHERE download_id = ?1", [download_id])?;
-        tx.execute(
-            "DELETE FROM sub_tracks WHERE download_id = ?1",
-            [download_id],
-        )?;
+        clear_cues(&tx, download_id)?;
+        // Earlier downloads of the same video (re-downloads) are replaced in the index, so a
+        // video appears once in search results.
+        let older: Vec<i64> = {
+            let mut st = tx.prepare(
+                "SELECT o.id FROM downloads o JOIN downloads d ON d.id = ?1 \
+                 WHERE o.id != d.id AND d.video_id != '' AND o.video_id = d.video_id \
+                 AND o.extractor = d.extractor",
+            )?;
+            let rows = st.query_map([download_id], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for o in older {
+            clear_cues(&tx, o)?;
+        }
         let mut n = 0;
         {
             let mut ins_track = tx.prepare(
@@ -760,9 +826,18 @@ impl Db {
             for t in tracks {
                 ins_track.execute(params![download_id, t.lang, t.is_auto, t.path])?;
                 let track_id = tx.last_insert_rowid();
+                let mut range: Option<(i64, i64)> = None;
                 for c in &t.cues {
                     ins_cue.execute(params![c.text, download_id, track_id, c.start, c.end])?;
+                    let r = tx.last_insert_rowid();
+                    range = Some(range.map_or((r, r), |(a, _)| (a, r)));
                     n += 1;
+                }
+                if let Some((a, b)) = range {
+                    tx.execute(
+                        "UPDATE sub_tracks SET first_cue = ?2, last_cue = ?3 WHERE id = ?1",
+                        params![track_id, a, b],
+                    )?;
                 }
             }
         }
@@ -967,7 +1042,60 @@ mod tests {
         assert_eq!(db.sub_track_paths(id).unwrap(), vec!["/subs/de.vtt"]);
         db.delete_downloads(&[other]).unwrap();
         assert!(db.search_cues("\"elephant\"*", 10).unwrap().is_empty());
+        // A re-download of the same video replaces the older entry's cues.
+        db.conn
+            .execute(
+                "UPDATE downloads SET video_id = 'v1', extractor = 'Youtube'",
+                [],
+            )
+            .unwrap();
+        let again = db.insert_download(&dl("Zoo again", Status::Done)).unwrap();
+        db.conn
+            .execute(
+                "UPDATE downloads SET video_id = 'v1', extractor = 'Youtube'",
+                [],
+            )
+            .unwrap();
+        db.store_subtitles(again, &[track("en", &[("hallo again", 1.0)])])
+            .unwrap();
+        let h = db.search_cues("\"hallo\"*", 10).unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].download_id, again);
+        assert_eq!(db.file_refs("/subs/en.vtt", &[]).unwrap(), 1);
         assert_eq!(db.cue_stats().unwrap(), (1, 1));
+    }
+
+    #[test]
+    fn migrates_v2_cues() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sub_tracks (id INTEGER PRIMARY KEY, download_id INTEGER NOT NULL,              lang TEXT NOT NULL, is_auto INTEGER NOT NULL DEFAULT 0, path TEXT NOT NULL);              CREATE VIRTUAL TABLE cues USING fts5(text, download_id UNINDEXED, track_id UNINDEXED,              start UNINDEXED, end UNINDEXED, tokenize='unicode61 remove_diacritics 2');              INSERT INTO cues(text, download_id, track_id, start, end) VALUES ('old words', 7, 1, 2.0, 3.0);              PRAGMA user_version = 2;",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        let sql: String = db
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'cues'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("prefix"));
+        let n: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cues WHERE cues MATCH 'old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let v: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
     }
 
     #[test]
