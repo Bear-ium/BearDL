@@ -102,7 +102,7 @@
 - **The tools' "cancel downloads" flag is cleared when an engine starts.** It stayed set after one engine shut down, which broke a second engine in the same process; only the test suite does that.
 - **Release pipeline.** `release.yml` runs on `v*` tags. It builds and tests natively on Windows x86_64, Linux x86_64, macOS arm64 (`macos-latest`) and macOS x86_64 (`macos-15-intel`, the last Intel image GitHub offers). Builds stop if the tag does not match the version in `Cargo.toml`. `ci.yml` runs the same build and tests on every branch push and pull request.
   - Asset names have no version in them (`beardl-windows-x86_64.zip`, `beardl-linux-x86_64.tar.gz`, `beardl-macos-aarch64.tar.gz`, `beardl-macos-x86_64.tar.gz`), so `releases/latest/download/<name>` always points at the newest build. `SHA256SUMS` covers all four.
-  - Releases are created with the preinstalled `gh` CLI and the workflow's own token. There are no third-party release actions, no secrets and no code signing.
+  - Releases are created with the preinstalled `gh` CLI and the workflow's own token. There are no third-party release actions, no secrets and no code signing. Only the release job may write to the repository, and the third-party actions (`dtolnay/rust-toolchain`, `Swatinem/rust-cache`) are pinned to commit SHAs.
   - No system packages are installed. Nothing the build links needs development headers.
   - On macOS the job checks that the linker's ad-hoc signature is still valid after `strip`, because Apple Silicon will not start a binary without one.
   - The Linux binary needs a glibc at least as new as the runner's (Ubuntu 24.04: 2.39). Building on an older image would widen support, but `ubuntu-latest` was asked for.
