@@ -1,8 +1,21 @@
 # BearDL
 
-A small, fast, native desktop app for [yt-dlp](https://github.com/yt-dlp/yt-dlp). It is written in Rust with egui (OpenGL) and has no Electron and no web view. A release build is about 5.6 MiB, paints its first frame about 250 ms after launch, and uses no CPU while idle.
+A small, fast, native desktop app for [yt-dlp](https://github.com/yt-dlp/yt-dlp). It is written in Rust with egui (OpenGL) and has no Electron and no web view. A release build is about 5.7 MiB, paints its first frame about 250 ms after launch, and uses no CPU while idle.
 
 yt-dlp and ffmpeg are not bundled. BearDL downloads them on first run into its data folder, verifies their checksums, and keeps them up to date.
+
+## Download
+
+Get BearDL from the [download page](https://bear-ium.github.io/BearDL/), which picks the right file for your system, or from the [Releases page](https://github.com/Bear-ium/BearDL/releases/latest). There are builds for Windows (x86_64), macOS (Apple silicon and Intel) and Linux (x86_64). Each is a single program in a `.zip` or `.tar.gz`, with nothing to install. Every release has a `SHA256SUMS` file for checking the downloads.
+
+### Unsigned builds
+
+The builds are not code-signed yet, so the first launch shows a warning:
+
+- **Windows:** SmartScreen says "Windows protected your PC". Select **More info**, then **Run anyway**.
+- **macOS:** right-click the program in Finder and choose **Open**. On macOS 15 and later, try to open it once, then select **Open Anyway** in System Settings, under Privacy & Security.
+
+You only need to do this once. If you would rather not run an unsigned program, build it from source (see [Building](#building)).
 
 ## Features
 
@@ -61,7 +74,15 @@ yt-dlp and ffmpeg are not bundled. BearDL downloads them on first run into its d
   - macOS: `brew install mpv`.
   - Linux: install your distribution's `libmpv2` (or `mpv-libs`) package.
   
-  Without libmpv, files open in an external `mpv`, or in your system player.
+  Without libmpv, files open in an external `mpv`, or in your system player. See [Built-in player](#built-in-player).
+
+## Built-in player
+
+The Player page plays files inside BearDL through libmpv, the library form of mpv. libmpv is not bundled. BearDL loads it at runtime when it finds it, so the app starts and works without it.
+
+- **Windows:** the normal mpv download has no `libmpv-2.dll`. Select **Download libmpv** on the Player page or in Settings, under Tools. BearDL fetches the latest `mpv-dev-x86_64` build from [mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake/releases), checks it against the SHA-256 that GitHub lists for it, and keeps only `libmpv-2.dll`, in the `tools\mpv` folder inside BearDL's data folder. You can follow the progress and cancel it. The player uses the new library straight away, with no restart.
+- **macOS and Linux:** nothing is downloaded. Install libmpv with your package manager (`brew install mpv`, `sudo apt install libmpv2`, `sudo dnf install mpv-libs` and so on). The Player page shows the command for your system, with a Copy button.
+- **Your own copy:** set **Custom libmpv** in Settings, under Tools, or the `BEARDL_LIBMPV` environment variable. Only that file is tried.
 
 ## Network access
 
@@ -135,6 +156,19 @@ cargo test
 `BEARDL_HOME=<folder>` keeps every file BearDL writes in one folder, which is useful for tests and portable use. `BEARDL_LIBMPV=<path>` points at a specific libmpv: only that file is tried, and it takes precedence over **Custom libmpv** in Settings.
 
 Project notes: `PLAN.md` (structure and data model), `DECISIONS.md` (choices and trade-offs) and `PROGRESS.md` (milestones and measurements).
+
+## Releasing
+
+Pushing a tag that starts with `v` builds, tests and publishes a release (`.github/workflows/release.yml`):
+
+1. Set the new version in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, and commit both.
+2. Tag that commit and push the tag:
+
+   ```
+   git tag v0.1.0 && git push origin v0.1.0
+   ```
+
+The workflow builds and tests on Windows, Linux and both kinds of Mac, then creates the GitHub release with all four archives, `SHA256SUMS` and release notes generated from the commits. It stops if the tag does not match the version in `Cargo.toml`. The asset names contain no version, so the download page always links to the newest release. Every branch push and pull request runs the same build and tests without releasing (`.github/workflows/ci.yml`).
 
 ## Where files go
 
