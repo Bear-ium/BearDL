@@ -440,11 +440,19 @@ pub fn analyse_args(url: &str) -> Vec<String> {
     v
 }
 
-/// `--flat-playlist` listing for subscription checks: one JSON line per entry.
+/// Playlists list oldest first and grow at the end; channels list newest first.
+pub fn is_playlist_url(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("list=") || u.contains("/playlist") || u.contains("/sets/")
+}
+
+/// `--flat-playlist` listing for subscription checks: one JSON line per entry. Channels are
+/// newest first, so only the first `max_items` are listed; playlists are listed in full,
+/// because new entries are added at the end.
 pub fn list_args(url: &str, max_items: u32) -> Vec<String> {
     let mut v = common_args();
     v.extend(["--flat-playlist", "-j"].map(String::from));
-    if max_items > 0 {
+    if max_items > 0 && !is_playlist_url(url) {
         v.push("--playlist-end".into());
         v.push(max_items.to_string());
     }

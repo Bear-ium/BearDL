@@ -7,6 +7,7 @@ mod search_view;
 mod settings_view;
 #[cfg(feature = "dev-shots")]
 mod shots;
+mod subscriptions_view;
 
 use crate::engine::{Engine, Level, Notice};
 use crate::settings::Settings;
@@ -64,6 +65,12 @@ pub struct App {
     lib: library_view::LibraryUi,
     player_ui: player_view::PlayerUi,
     search: search_view::SearchUi,
+    subs: subscriptions_view::SubsUi,
+    tray: Option<crate::platform::Tray>,
+    quitting: bool,
+    /// Started with `--minimised`: frames left before hiding in the tray. eframe shows the
+    /// window after its first frame whatever the builder says, so the hide comes after that.
+    hide_at_start: u8,
     presets: presets_view::PresetsUi,
     toasts: Vec<Toast>,
     bench_exit: bool,
@@ -82,7 +89,7 @@ pub struct App {
 const TOAST_SECS: f64 = 6.0;
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, bench_exit: bool) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, bench_exit: bool, minimised: bool) -> Self {
         crate::startup::mark("creator");
         let _ = crate::paths::ensure_dirs();
         let settings = Settings::load();
@@ -114,6 +121,10 @@ impl App {
             dl: Default::default(),
             lib: Default::default(),
             search: Default::default(),
+            subs: Default::default(),
+            tray: None,
+            quitting: false,
+            hide_at_start: 0,
             player_ui: player_view::PlayerUi {
                 gl_proc: cc.get_proc_address.clone(),
                 ..Default::default()
@@ -137,6 +148,70 @@ impl App {
         }
         .with_dev_setup()
         .with_theme(&cc.egui_ctx)
+        .with_tray(&cc.egui_ctx, bench_exit, minimised)
+    }
+
+    fn with_tray(mut self, ctx: &egui::Context, bench_exit: bool, minimised: bool) -> Self {
+        if !bench_exit {
+            match crate::platform::Tray::new(ctx) {
+                Ok(t) => self.tray = Some(t),
+                Err(e) => self.push_toast(Level::Error, format!("No tray icon: {e}")),
+            }
+        }
+        if minimised {
+            if self.tray.is_some() {
+                self.hide_at_start = 2;
+            } else {
+                // No tray to bring it back: start minimised instead.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
+        // Keep the start-up entry pointing at this program if it has moved.
+        if self.settings.start_with_os && !bench_exit {
+            let _ = crate::platform::set_autostart(true);
+        }
+        self
+    }
+
+    /// Tray menu, close-to-tray and desktop notifications. Runs in `logic`, which eframe also
+    /// calls while the window is hidden.
+    fn handle_os(&mut self, ctx: &egui::Context) {
+        let events = self.tray.as_ref().map(|t| t.events()).unwrap_or_default();
+        for ev in events {
+            match ev {
+                crate::platform::TrayEvent::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                crate::platform::TrayEvent::CheckSubscriptions => {
+                    self.engine.send(crate::engine::Cmd::CheckAllSubscriptions);
+                }
+                crate::platform::TrayEvent::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        let close = ctx.input(|i| i.viewport().close_requested());
+        if close && !self.quitting && self.settings.close_to_tray && self.tray.is_some() {
+            // Keep running in the tray so subscriptions keep checking.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if let Some(p) = &self.player_ui.player
+                && !p.paused()
+            {
+                p.toggle_pause();
+            }
+        }
+        let notices = std::mem::take(&mut self.engine.state().desktop_notices);
+        for (title, body) in notices {
+            match &self.tray {
+                Some(t) => t.notify(&title, &body),
+                None => crate::platform::notify(&title, &body),
+            }
+        }
     }
 
     fn with_theme(mut self, ctx: &egui::Context) -> Self {
@@ -182,6 +257,9 @@ impl App {
             if let Some(p) = s.page.as_deref().and_then(Page::from_name) {
                 self.page = p;
             }
+            if s.trim {
+                self.player_ui.dev_open_trim();
+            }
             if let Some(q) = s.search.clone() {
                 self.search.dev_set(&q);
             }
@@ -204,6 +282,15 @@ impl App {
         // Wait until text editing ends, so partial paths are never applied.
         if self.settings == self.saved_settings || ctx.memory(|m| m.focused().is_some()) {
             return;
+        }
+        if self.settings.start_with_os != self.saved_settings.start_with_os
+            && let Err(e) = crate::platform::set_autostart(self.settings.start_with_os)
+        {
+            self.push_toast(
+                Level::Error,
+                format!("Could not change start-up setting: {e}"),
+            );
+            self.settings.start_with_os = self.saved_settings.start_with_os;
         }
         self.settings = self.settings.clone().sanitised();
         if let Err(e) = self.settings.save() {
@@ -285,7 +372,8 @@ impl App {
             let st = self.engine.state();
             match &st.tools.busy {
                 Some(job) => {
-                    ui.spinner();
+                    // Static, not a spinner: background checks must not repaint every frame.
+                    ui.label("↻");
                     let text = match job.total {
                         Some(t) if t > 0 => format!(
                             "{} {} / {}",
@@ -322,6 +410,7 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.handle_os(ctx);
         self.drive_player(ctx, frame);
     }
 
@@ -337,10 +426,7 @@ impl eframe::App for App {
             Page::Library => library_view::show(self, ui),
             Page::Player => player_view::show(self, ui, frame),
             Page::Search => search_view::show(self, ui),
-            other => {
-                ui.heading(other.label());
-                ui.weak("Coming in a later milestone.");
-            }
+            Page::Subscriptions => subscriptions_view::show(self, ui),
         });
         self.after_frame(&ctx);
     }
@@ -378,6 +464,15 @@ impl App {
     }
 
     fn after_frame(&mut self, ctx: &egui::Context) {
+        if self.hide_at_start > 0 {
+            self.hide_at_start -= 1;
+            if self.hide_at_start == 0 {
+                crate::startup::mark("hiding in tray");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ctx.request_repaint();
+            }
+        }
         let ctx = ctx.clone();
         self.show_toasts(&ctx);
         let (imported, themes_rev) = {

@@ -256,6 +256,8 @@ impl Player {
         self.tracks.clear();
         self.chapters.clear();
         self.file = file.to_path_buf();
+        // mpv keeps runtime options across files: a trim preview loop must not carry over.
+        self.set_loop(None);
         match start {
             Some(s) if s > 0.0 => {
                 self.set("start", &format!("{s:.3}"));

@@ -16,6 +16,7 @@ pub mod subtitles;
 pub mod theme;
 pub mod thumbs;
 pub mod tools;
+pub mod trim;
 pub mod ui;
 pub mod util;
 pub mod ytdlp;

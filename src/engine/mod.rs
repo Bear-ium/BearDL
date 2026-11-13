@@ -2,9 +2,13 @@
 //! [`Cmd`]s; the engine updates [`State`] behind a mutex and wakes the UI. When nothing is
 //! happening it sleeps until the next scheduled task.
 mod downloads;
+mod subscriptions;
 mod tooljobs;
+mod trims;
 
 pub use downloads::{ItemProgress, NewItem, QueueItem};
+pub use subscriptions::{SubView, name_from_url};
+pub use trims::TrimJob;
 
 use crate::db::Db;
 use crate::settings::Settings;
@@ -70,6 +74,28 @@ pub enum Cmd {
     ValidateArgs(String),
     /// Playback position to resume from next time.
     SaveResume(i64, f64),
+    AddSubscription {
+        name: String,
+        url: String,
+        config: crate::subs::SubConfig,
+    },
+    UpdateSubscription {
+        id: i64,
+        name: String,
+        url: String,
+        config: crate::subs::SubConfig,
+    },
+    DeleteSubscription(i64),
+    PauseSubscription(i64, bool),
+    CheckSubscription(i64),
+    CheckAllSubscriptions,
+    /// Cut `[start, end]` seconds of a library item into a new clip.
+    Trim {
+        id: i64,
+        start: f64,
+        end: f64,
+        accurate: bool,
+    },
     Export {
         path: PathBuf,
         settings: Box<Settings>,
@@ -142,6 +168,10 @@ pub struct State {
     pub imported_settings: Option<Settings>,
     /// Bumped when theme files change on disk (after an import).
     pub themes_rev: u64,
+    pub subscriptions: Vec<SubView>,
+    /// Desktop notifications for the UI to show (title, body).
+    pub desktop_notices: Vec<(String, String)>,
+    pub trims: Vec<TrimJob>,
 }
 
 impl State {
@@ -252,6 +282,11 @@ enum Done {
     Validation(String, Result<(), String>),
     Expanded(String, Result<Vec<NewItem>, String>),
     Scan(Result<Vec<downloads::ScanChange>, String>),
+    SubChecked(
+        i64,
+        Result<(Vec<crate::ytdlp::Entry>, Option<String>), String>,
+    ),
+    Trimmed(trims::TrimResult),
 }
 
 /// A running download: its run number (to tell restarts apart) and its stop signal.
@@ -296,6 +331,12 @@ struct Core {
     db_path: PathBuf,
     /// Analysis requested while yt-dlp was still being installed.
     deferred_analysis: Option<String>,
+    subs_checking: HashSet<i64>,
+    next_trim: u64,
+    /// Clip files being written, so simultaneous trims never pick the same name.
+    trim_outputs: HashSet<PathBuf>,
+    trim_queue: VecDeque<trims::Pending>,
+    trim_running: bool,
 }
 
 impl Core {
@@ -333,6 +374,11 @@ impl Core {
             warned_no_ffmpeg: false,
             scanning: false,
             db_path: cfg.db_path.clone(),
+            subs_checking: HashSet::new(),
+            next_trim: 0,
+            trim_outputs: HashSet::new(),
+            trim_queue: VecDeque::new(),
+            trim_running: false,
             deferred_analysis: None,
         }
     }
@@ -354,8 +400,15 @@ impl Core {
             self.spawn_tool_job(ToolJob::InstallFfmpeg);
         }
         self.pump();
+        self.refresh_subs();
         loop {
-            let next = self.next_update_check();
+            // One timer: the sooner of the next update check and the next subscription check.
+            let mut next = self.next_update_check();
+            if let Some(due) = self.next_sub_due() {
+                // Capped, because the monotonic clock may not count time spent suspended.
+                let secs = (due - unix_now()).clamp(0, 15 * 60) as u64;
+                next = next.min(tokio::time::Instant::now() + Duration::from_secs(secs));
+            }
             let sleep = tokio::time::sleep_until(next);
             tokio::select! {
                 cmd = self.rx.recv() => match cmd {
@@ -364,12 +417,15 @@ impl Core {
                 },
                 Some(done) = self.done_rx.recv() => self.on_done(done).await,
                 _ = sleep => {
-                    if self.settings.auto_update && self.tools_busy.is_none() && !self.ytdlp_overridden() {
-                        self.pending_auto = true;
-                        self.spawn_tool_job(ToolJob::Check);
-                    } else {
-                        // Push the next check forward so the loop does not spin.
-                        self.shared.lock().tools.last_check = unix_now();
+                    self.check_due_subs();
+                    if self.update_due() {
+                        if self.settings.auto_update && self.tools_busy.is_none() && !self.ytdlp_overridden() {
+                            self.pending_auto = true;
+                            self.spawn_tool_job(ToolJob::Check);
+                        } else {
+                            // Push the next check forward so the loop does not spin.
+                            self.shared.lock().tools.last_check = unix_now();
+                        }
                     }
                 }
             }
@@ -401,6 +457,8 @@ impl Core {
                 self.after_check();
                 self.next_tool_job();
                 self.pump();
+                // Subscriptions waiting for yt-dlp can run now.
+                self.check_due_subs();
                 if self.tools_busy.is_none()
                     && let Some(url) = self.deferred_analysis.take()
                 {
@@ -434,6 +492,8 @@ impl Core {
                         .update(|s| s.notify(Level::Error, format!("{url}: {e}"))),
                 }
             }
+            Done::SubChecked(id, res) => self.finish_check(id, res),
+            Done::Trimmed(r) => self.finish_trim(r),
             Done::Scan(result) => match result {
                 Ok(changes) => self.apply_scan(changes),
                 Err(e) => {
@@ -517,11 +577,18 @@ impl Core {
         !self.settings.ytdlp_path.trim().is_empty()
     }
 
+    /// Whether the scheduled yt-dlp update check is due (wall-clock time).
+    fn update_due(&self) -> bool {
+        let last = self.shared.lock().tools.last_check;
+        let interval = self.settings.update_interval_hours.max(1) as i64 * 3600;
+        unix_now() >= last + interval
+    }
+
     fn next_update_check(&self) -> tokio::time::Instant {
         let last = self.shared.lock().tools.last_check;
         let interval = self.settings.update_interval_hours.max(1) as i64 * 3600;
-        let due = (last + interval - unix_now()).clamp(60, interval);
-        tokio::time::Instant::now() + Duration::from_secs(due as u64)
+        let due = (last + interval - unix_now()).clamp(0, interval);
+        tokio::time::Instant::now() + Duration::from_secs(due.max(1) as u64)
     }
 
     /// After an automatic check, install the update if one was found.
@@ -611,6 +678,35 @@ impl Core {
             Cmd::SavePreset { old_name, preset } => self.save_preset(old_name, preset),
             Cmd::DeletePreset(name) => self.delete_preset(&name),
             Cmd::ValidateArgs(args) => self.validate_args(args),
+            Cmd::AddSubscription { name, url, config } => self.add_sub(name, url, config),
+            Cmd::UpdateSubscription {
+                id,
+                name,
+                url,
+                config,
+            } => self.update_sub(id, name, url, config),
+            Cmd::DeleteSubscription(id) => self.delete_sub(id),
+            Cmd::PauseSubscription(id, p) => self.pause_sub(id, p),
+            Cmd::CheckSubscription(id) => self.check_sub(id),
+            Cmd::Trim {
+                id,
+                start,
+                end,
+                accurate,
+            } => self.start_trim(id, start, end, accurate),
+            Cmd::CheckAllSubscriptions => {
+                let ids: Vec<i64> = self
+                    .shared
+                    .lock()
+                    .subscriptions
+                    .iter()
+                    .filter(|v| !v.sub.paused)
+                    .map(|v| v.sub.id)
+                    .collect();
+                for id in ids {
+                    self.check_sub(id);
+                }
+            }
             Cmd::SaveResume(id, pos) => {
                 if let Some(db) = &self.db {
                     let _ = db.set_resume(id, pos);

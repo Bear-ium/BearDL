@@ -76,7 +76,9 @@ impl Core {
 
     pub(super) fn spawn_tool_job(&mut self, job: ToolJob) {
         // Replacing yt-dlp while it runs fails on Windows, so wait for downloads to finish.
-        let wait_for_downloads = job.touches_ytdlp() && !self.running.is_empty();
+        // Subscription checks run yt-dlp too.
+        let wait_for_downloads =
+            job.touches_ytdlp() && (!self.running.is_empty() || !self.subs_checking.is_empty());
         if self.tools_busy.is_some() || wait_for_downloads {
             if !self.tool_queue.contains(&job) {
                 self.tool_queue.push_back(job);

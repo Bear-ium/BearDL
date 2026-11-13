@@ -699,6 +699,7 @@ impl Core {
                             let _ = db.set_file(id, f, size);
                         }
                         self.set_status(id, Status::Done, "");
+                        self.notify_sub_download(id);
                         self.shared.update(|s| {
                             if let Some(q) = s.item_mut(id) {
                                 q.file_path = f.clone();

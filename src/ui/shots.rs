@@ -13,6 +13,7 @@ pub struct Shots {
     pub select_first: bool,
     pub play_first: bool,
     pub search: Option<String>,
+    pub trim: bool,
 }
 
 impl Shots {
@@ -33,6 +34,7 @@ impl Shots {
             search: std::env::var("BEARDL_SHOT_SEARCH")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            trim: std::env::var("BEARDL_SHOT_TRIM").is_ok_and(|v| !v.is_empty()),
         })
     }
 

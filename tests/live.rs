@@ -287,3 +287,184 @@ fn immediate_resume_after_pause_completes() {
         engine.state().queue[0].status == Status::Done
     });
 }
+
+#[test]
+#[ignore]
+fn subscription_checks_only_queue_new_items() {
+    use beardl::subs::SubConfig;
+    let h = home("subs");
+    let engine = start(&h);
+    wait("yt-dlp install", 180, || {
+        engine.state().paths.ytdlp.is_some()
+    });
+    engine.send(Cmd::AddSubscription {
+        name: String::new(),
+        url: "https://www.youtube.com/@jawed/videos".into(),
+        config: SubConfig {
+            max_items: 3,
+            ..Default::default()
+        },
+    });
+    wait("first check", 120, || {
+        engine
+            .state()
+            .subscriptions
+            .first()
+            .is_some_and(|v| !v.logs.is_empty() && !v.checking)
+    });
+    let v = engine.state().subscriptions[0].clone();
+    eprintln!("name: {} | log: {}", v.sub.name, v.logs[0].message);
+    assert!(!v.logs[0].is_error, "{}", v.logs[0].message);
+    assert!(v.seen >= 1);
+    let queued: Vec<_> = engine
+        .state()
+        .queue
+        .iter()
+        .map(|q| q.title.clone())
+        .collect();
+    assert!(!queued.is_empty(), "first check queues the newest items");
+    wait("download", 300, || {
+        engine
+            .state()
+            .queue
+            .iter()
+            .all(|q| !matches!(q.status, Status::Queued | Status::Running))
+    });
+    let notices = engine.state().desktop_notices.clone();
+    eprintln!("notices: {notices:?}");
+    assert!(
+        !notices.is_empty(),
+        "a notification is raised for new downloads"
+    );
+
+    let before = engine.state().queue.len();
+    engine.send(Cmd::CheckSubscription(v.sub.id));
+    wait("second check", 120, || {
+        let st = engine.state();
+        let s = &st.subscriptions[0];
+        !s.checking && s.logs.len() >= 2
+    });
+    let v2 = engine.state().subscriptions[0].clone();
+    eprintln!("second: {}", v2.logs[0].message);
+    assert!(
+        v2.logs[0].message.contains("0 queued"),
+        "{}",
+        v2.logs[0].message
+    );
+    assert_eq!(engine.state().queue.len(), before);
+}
+
+/// Shows a real tray icon and notification briefly, and adds then removes the start-up entry.
+#[test]
+#[ignore]
+fn tray_notification_and_autostart() {
+    let ctx = eframe::egui::Context::default();
+    let tray = beardl::platform::Tray::new(&ctx).expect("tray icon");
+    tray.notify("BearDL test", "Tray notifications work");
+    std::thread::sleep(Duration::from_secs(2));
+    drop(tray);
+    beardl::platform::set_autostart(true).unwrap();
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "BearDL",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        eprintln!("{text}");
+        assert!(text.contains("--minimised"));
+    }
+    beardl::platform::set_autostart(false).unwrap();
+    beardl::platform::set_autostart(false).unwrap();
+}
+
+#[test]
+#[ignore]
+fn trims_fast_and_accurate() {
+    let h = home("trim");
+    let engine = start(&h);
+    wait("yt-dlp install", 180, || {
+        engine.state().paths.ytdlp.is_some()
+    });
+    engine.send(Cmd::Enqueue(vec![NewItem {
+        url: DIRECT.into(),
+        title: "trim".into(),
+        ..Default::default()
+    }]));
+    wait("download", 120, || {
+        engine
+            .state()
+            .queue
+            .first()
+            .is_some_and(|q| q.status == Status::Done)
+    });
+    let id = engine.state().queue[0].id;
+    engine.send(Cmd::Trim {
+        id,
+        start: 2.0,
+        end: 5.0,
+        accurate: false,
+    });
+    engine.send(Cmd::Trim {
+        id,
+        start: 2.0,
+        end: 5.0,
+        accurate: true,
+    });
+    wait("both trims", 120, || {
+        let st = engine.state();
+        st.trims.len() == 2 && st.trims.iter().all(|t| t.done)
+    });
+    let trims = engine.state().trims.clone();
+    drop(engine);
+    for t in &trims {
+        assert!(t.error.is_none(), "{:?}", t.error);
+    }
+    let db = Db::open(&h.join("library.sqlite")).unwrap();
+    let q = beardl::db::LibraryQuery {
+        text: "clip".into(),
+        ..Default::default()
+    };
+    let rows = db.library_page(&q, 0, 10).unwrap();
+    assert_eq!(rows.len(), 2, "both clips are library entries");
+    let a = db.get_download(rows[0].id).unwrap().unwrap().file_path;
+    let b = db.get_download(rows[1].id).unwrap().unwrap().file_path;
+    assert_ne!(a, b, "simultaneous trims write different files");
+    let mut durations = Vec::new();
+    for r in rows {
+        let d = db.get_download(r.id).unwrap().unwrap();
+        assert!(std::path::Path::new(&d.file_path).is_file());
+        let out = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&d.file_path)
+            .output()
+            .unwrap();
+        let dur: f64 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        eprintln!("{} -> {dur:.2}s", d.file_path);
+        // Fast cuts start at the keyframe before the start, so they can be longer.
+        assert!((2.8..=5.6).contains(&dur), "clip length {dur}");
+        assert!(d.title.contains("mov_bbb"));
+        let stored = d.duration.unwrap_or(0.0);
+        assert!(
+            (stored - dur).abs() < 0.3,
+            "library length {stored} vs file {dur}"
+        );
+        durations.push(dur);
+    }
+    assert!(
+        durations.iter().any(|d| (d - 3.0).abs() < 0.2),
+        "the accurate clip is exact: {durations:?}"
+    );
+}

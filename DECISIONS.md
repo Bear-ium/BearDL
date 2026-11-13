@@ -76,3 +76,25 @@
 - **The parser is line-based**, to handle blank lines that hold spaces, missing separators, lone CRs, numeric entities and `{\an8}` tags. Folding repeated lines is applied only to automatic captions, so real repeats in manual subtitles stay.
 - **Cue index (schema v3).** The FTS5 `cues` table has `prefix='2 3'`. Each track stores the rowid range of its cues, so deleting cues is a range delete; `download_id` is UNINDEXED in FTS5, so deleting by it would scan everything. Re-indexing a video replaces the cues of earlier downloads of the same video. Shared subtitle files are never deleted while referenced.
 - **Search queries run on a worker thread** with their own connection. The engine bumps `library_rev` after indexing finishes, so open search results refresh.
+- **Subscriptions.**
+  - Each check runs `yt-dlp --flat-playlist -j`. Channels list newest first, so `--playlist-end <items>` applies. Playlists list oldest first, so they are listed in full and reversed before planning.
+  - Every listed ID goes into `sub_seen`, including filtered ones, so only genuinely new items are queued.
+  - On the first check, the newest *N* are queued, or none with "Only future uploads". A failed first check keeps its first-check status.
+  - YouTube channel root URLs get `/videos` appended. A listing of only tabs is logged as an error.
+  - Checks time out after 5 minutes.
+  - The engine has a single timer: it sleeps until the sooner of the next subscription check and the next update check, capped at 15 minutes because the monotonic clock may not count suspend. Due times are clamped to one interval if the clock goes backwards.
+  - Checks wait while yt-dlp is missing or updating. Updates wait for running checks.
+- **Tray.**
+  - Windows has a hand-rolled `Shell_NotifyIconW` tray on a hidden top-level window (not message-only, so it receives TaskbarCreated after an Explorer restart). Its menu has Show, Check subscriptions and Quit. Notifications are balloons, and the icon is removed synchronously on exit.
+  - macOS and Linux use `tray-icon`, with the ksni backend on Linux (no GTK). Notifications go through `osascript` or `notify-send`, with markup escaped and the child process reaped.
+  - Close-to-tray (`CancelClose` plus `Visible(false)`) was verified: after a close request the process keeps running with its window hidden. It is off by default on Linux, where many desktops show no tray.
+- **Start with the OS** uses the HKCU Run key on Windows, a LaunchAgent plist on macOS, and `~/.config/autostart/*.desktop` on Linux (AppImage aware, with Exec escaping). It starts with `--minimised`. eframe always shows the window after its first frame, so the window is hidden on the second; a minimised start was verified to leave the main window hidden. The entry is refreshed at start, so it follows the program if it moves.
+- **The status bar has no spinner.** A background update check animated it at 60 fps for its duration. The bar now shows static text.
+- **Trimming.**
+  - Fast mode copies streams (`-ss`/`-to` before `-i`, `-map 0 -map -0:d -c copy`) and starts at the keyframe before the start.
+  - Accurate mode re-encodes video and audio only.
+  - A clip's duration is probed with ffprobe.
+  - Trims run one at a time. Partial outputs are deleted on failure or exit.
+  - Clips go next to the source, or to the download folder if that is read-only. They become new library entries (dated now, no subscription) that share the source's thumbnail.
+  - The preview is an mpv A-B loop, cleared when a new file opens.
+- **M7 and M8 share one commit**, because their review fixes touch the same engine and player files.

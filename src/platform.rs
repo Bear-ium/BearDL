@@ -110,7 +110,17 @@ impl Tray {
             let c = ctx.clone();
             tray_icon::TrayIconEvent::set_event_handler(Some(
                 move |e: tray_icon::TrayIconEvent| {
-                    if let tray_icon::TrayIconEvent::DoubleClick { .. } = e {
+                    use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent as E};
+                    let show = matches!(
+                        e,
+                        E::DoubleClick { .. }
+                            | E::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            }
+                    );
+                    if show {
                         let _ = tx.send(TrayEvent::Show);
                         c.request_repaint();
                     }
@@ -151,16 +161,26 @@ pub fn notify(title: &str, body: &str) {
             esc(body),
             esc(title)
         );
-        let _ = crate::util::command("osascript")
-            .arg("-e")
-            .arg(script)
-            .spawn();
+        reap(
+            crate::util::command("osascript")
+                .arg("-e")
+                .arg(script)
+                .spawn(),
+        );
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = crate::util::command("notify-send")
-            .args(["--app-name=BearDL", "--", title, body])
-            .spawn();
+        // notify-send bodies are markup.
+        let esc = |s: &str| {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        };
+        reap(
+            crate::util::command("notify-send")
+                .args(["--app-name=BearDL", "--", &esc(title), &esc(body)])
+                .spawn(),
+        );
     }
     #[cfg(windows)]
     {
@@ -168,9 +188,28 @@ pub fn notify(title: &str, body: &str) {
     }
 }
 
+/// Waits for a helper process on a short-lived thread, so it does not linger as a zombie.
+#[cfg(unix)]
+fn reap(child: std::io::Result<std::process::Child>) {
+    if let Ok(mut c) = child {
+        std::thread::spawn(move || {
+            let _ = c.wait();
+        });
+    }
+}
+
+/// The program to start: the AppImage itself when running from one (its mount is temporary).
+fn launcher() -> Result<std::path::PathBuf, String> {
+    if let Some(a) = std::env::var_os("APPIMAGE") {
+        return Ok(a.into());
+    }
+    std::env::current_exe().map_err(|e| e.to_string())
+}
+
 /// Registers or removes the app from the OS's start-up list. It starts with `--minimised`.
+/// Calling it again refreshes the path if the program has moved.
 pub fn set_autostart(enable: bool) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = launcher()?;
     #[cfg(windows)]
     {
         win::set_run_key(enable, &format!("\"{}\" --minimised", exe.display()))
@@ -206,9 +245,18 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
             let _ = std::fs::remove_file(&file);
             return Ok(());
         }
+        // Desktop Entry quoting: escape `"`, `` ` ``, `$` and `\` inside quotes; `%` is `%%`.
+        let quoted: String = exe
+            .to_string_lossy()
+            .chars()
+            .flat_map(|c| match c {
+                '"' | '`' | '$' | '\\' => vec!['\\', c],
+                '%' => vec!['%', '%'],
+                c => vec![c],
+            })
+            .collect();
         let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName=BearDL\nExec=\"{}\" --minimised\nX-GNOME-Autostart-enabled=true\n",
-            exe.display()
+            "[Desktop Entry]\nType=Application\nName=BearDL\nExec=\"{quoted}\" --minimised\nX-GNOME-Autostart-enabled=true\n"
         );
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         std::fs::write(file, desktop).map_err(|e| e.to_string())
@@ -304,6 +352,8 @@ mod win {
             d.hIcon = make_icon();
             copy_into(&mut d.szTip, "BearDL");
             Shell_NotifyIconW(NIM_ADD, &d);
+            // The shell keeps its own copy of the icon.
+            DestroyIcon(d.hIcon);
         }
     }
 
@@ -339,6 +389,8 @@ mod win {
                 std::ptr::null(),
             );
             DestroyMenu(menu);
+            // Lets the menu close properly when it is dismissed (documented TrackPopupMenu quirk).
+            PostMessageW(hwnd, WM_NULL, 0, 0);
             match cmd as usize {
                 ID_SHOW => emit(TrayEvent::Show),
                 ID_CHECK => emit(TrayEvent::CheckSubscriptions),
@@ -397,16 +449,18 @@ mod win {
                             ..std::mem::zeroed()
                         };
                         RegisterClassW(&wc);
+                        // A hidden top-level window (never shown), not a message-only one:
+                        // those miss the TaskbarCreated broadcast and cannot own the menu.
                         let hwnd = CreateWindowExW(
-                            0,
+                            WS_EX_TOOLWINDOW,
                             class.as_ptr(),
                             class.as_ptr(),
+                            WS_POPUP,
                             0,
                             0,
                             0,
                             0,
-                            0,
-                            HWND_MESSAGE,
+                            std::ptr::null_mut(),
                             std::ptr::null_mut(),
                             hinst,
                             std::ptr::null(),
@@ -459,8 +513,11 @@ mod win {
         fn drop(&mut self) {
             let hwnd = HWND_VALUE.swap(0, Ordering::SeqCst) as HWND;
             if !hwnd.is_null() {
-                // SAFETY: ask the tray thread to remove the icon and end its loop.
+                // SAFETY: remove the icon now (the process may exit right after), then ask the
+                // tray thread to close its window and end its loop.
                 unsafe {
+                    let d = base_data(hwnd);
+                    Shell_NotifyIconW(NIM_DELETE, &d);
                     PostMessageW(hwnd, WM_CLOSE, 0, 0);
                 }
             }

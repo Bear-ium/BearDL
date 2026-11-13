@@ -1,12 +1,22 @@
 //! Player page: embedded libmpv video with controls and a metadata panel.
 use super::App;
 use crate::db::Download;
+use crate::engine::Cmd;
 use crate::player::{GetProcAddress, Player};
 use crate::util::{format_bytes, format_duration, format_upload_date};
 use eframe::egui;
 use std::sync::Arc;
 
 const SPEEDS: [f64; 8] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 3.0];
+
+#[derive(Default)]
+pub(crate) struct TrimUi {
+    open: bool,
+    start: String,
+    end: String,
+    accurate: bool,
+    previewing: bool,
+}
 
 #[derive(Default)]
 pub struct PlayerUi {
@@ -17,6 +27,9 @@ pub struct PlayerUi {
     pub gl_proc: Option<GetProcAddress>,
     pub show_meta: bool,
     pub fullscreen: bool,
+    pub(crate) trim: TrimUi,
+    /// Chapters of the current file from its library metadata, parsed once.
+    pub(crate) chapters: Vec<crate::ytdlp::Chapter>,
     pub(crate) seek_drag: Option<f64>,
     pub(crate) last_size: [i32; 2],
     /// Last position saved for resuming, and when.
@@ -111,6 +124,12 @@ impl App {
                     return;
                 }
                 self.player_ui.saved = (start.unwrap_or(0.0), ctx.input(|i| i.time));
+                self.player_ui.chapters = crate::ytdlp::parse_chapters(&d.chapters_json);
+                // A new file starts with a fresh trim selection.
+                self.player_ui.trim = TrimUi {
+                    open: self.player_ui.trim.open,
+                    ..Default::default()
+                };
                 self.player_ui.current = Some(d);
                 self.page = super::Page::Player;
             }
@@ -145,6 +164,16 @@ impl App {
     }
 }
 
+impl PlayerUi {
+    /// Development screenshots: open the trim panel with a selection.
+    #[cfg(feature = "dev-shots")]
+    pub fn dev_open_trim(&mut self) {
+        self.trim.open = true;
+        self.trim.start = "0:02".into();
+        self.trim.end = "0:05".into();
+    }
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
     let has_file = app
         .player_ui
@@ -163,11 +192,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
             .min_size(220.0)
             .show(ui, |ui| meta_panel(app, ui));
     }
-    let controls_h = if ui.available_width() < 900.0 {
+    let mut controls_h = if ui.available_width() < 900.0 {
         92.0
     } else {
         64.0
     };
+    if app.player_ui.trim.open {
+        controls_h += 80.0;
+    }
     let avail = ui.available_size();
     let video = egui::vec2(avail.x, (avail.y - controls_h).max(60.0));
     let ppp = ui.ctx().pixels_per_point();
@@ -195,6 +227,163 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         toggle_fullscreen(app, ui.ctx());
     }
     controls(app, ui);
+    if app.player_ui.trim.open {
+        trim_panel(app, ui);
+    }
+}
+
+fn trim_panel(app: &mut App, ui: &mut egui::Ui) {
+    let Some(p) = app.player_ui.player.as_ref() else {
+        return;
+    };
+    let Some(d) = app.player_ui.current.clone() else {
+        return;
+    };
+    let pos = p.position().unwrap_or(0.0);
+    let dur = p.duration().or(d.duration);
+    let t = &mut app.player_ui.trim;
+    let mut cmd = None;
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Start");
+        ui.add(
+            egui::TextEdit::singleline(&mut t.start)
+                .hint_text("0:00")
+                .desired_width(70.0),
+        );
+        if ui
+            .small_button("Set")
+            .on_hover_text("Use the current position")
+            .clicked()
+        {
+            t.start = format_duration(pos);
+        }
+        ui.label("End");
+        ui.add(
+            egui::TextEdit::singleline(&mut t.end)
+                .hint_text(dur.map(format_duration).unwrap_or_default())
+                .desired_width(70.0),
+        );
+        if ui
+            .small_button("Set")
+            .on_hover_text("Use the current position")
+            .clicked()
+        {
+            t.end = format_duration(pos);
+        }
+        let chapters = app.player_ui.chapters.clone();
+        let marks = &p.chapters;
+        if !chapters.is_empty() || !marks.is_empty() {
+            // Chapters from the library metadata, or those mpv found in the file.
+            let list: Vec<crate::ytdlp::Chapter> = if chapters.is_empty() {
+                marks
+                    .iter()
+                    .map(|m| crate::ytdlp::Chapter {
+                        start: m.time,
+                        end: f64::NAN,
+                        title: m.title.clone(),
+                    })
+                    .collect()
+            } else {
+                chapters
+            };
+            egui::ComboBox::from_id_salt("trim_chapter")
+                .selected_text("Chapter")
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for (i, c) in list.iter().enumerate() {
+                        if ui
+                            .selectable_label(
+                                false,
+                                format!("{}  {}", format_duration(c.start), c.title),
+                            )
+                            .clicked()
+                            && let Some((a, b)) = crate::trim::chapter_range(&list, i, dur)
+                        {
+                            t.start = format_duration(a);
+                            t.end = format_duration(b);
+                        }
+                    }
+                });
+        }
+        ui.separator();
+        ui.radio_value(&mut t.accurate, false, "Fast")
+            .on_hover_text("Copies the streams: instant, but cuts at the nearest keyframes");
+        ui.radio_value(&mut t.accurate, true, "Accurate")
+            .on_hover_text("Re-encodes for exact cuts: slower; keeps video and audio only");
+    });
+    // Empty fields mean the start or end of the file; anything else must parse.
+    let parse = |s: &str, default: Option<f64>| -> Result<f64, String> {
+        if s.trim().is_empty() {
+            default.ok_or_else(|| "set an end time".to_owned())
+        } else {
+            crate::util::parse_duration(s).ok_or_else(|| format!("“{s}” is not a time like 1:23"))
+        }
+    };
+    let parsed = parse(&t.start, Some(0.0)).and_then(|a| Ok((a, parse(&t.end, dur)?)));
+    let (start, end) = parsed.clone().unwrap_or((0.0, 0.0));
+    let valid = parsed.and_then(|(a, b)| crate::trim::validate(a, b, dur));
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(valid.is_ok(), egui::Button::new("Preview"))
+            .on_hover_text("Loop the selection in the player")
+            .clicked()
+        {
+            // A loop ending at the very end would stop at end-of-file instead of looping.
+            let b = dur.map_or(end, |d| end.min(d - 0.05));
+            p.set_loop(Some((start, b)));
+            p.seek(start);
+            if p.paused() {
+                p.toggle_pause();
+            }
+            t.previewing = true;
+        }
+        if t.previewing && ui.button("Stop preview").clicked() {
+            p.set_loop(None);
+            t.previewing = false;
+        }
+        if ui
+            .add_enabled(valid.is_ok(), egui::Button::new("Save clip"))
+            .on_hover_text("Write the selection to a new file next to this one")
+            .clicked()
+        {
+            cmd = Some(Cmd::Trim {
+                id: d.id,
+                start,
+                end,
+                accurate: t.accurate,
+            });
+        }
+        if let Err(e) = &valid {
+            if !t.start.is_empty() || !t.end.is_empty() {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+            }
+        } else {
+            ui.weak(format!("{} selected", format_duration(end - start)));
+        }
+    });
+    let jobs = app.engine.state().trims.clone();
+    for j in jobs.iter().rev().take(3) {
+        ui.horizontal(|ui| match (&j.error, j.done) {
+            (Some(e), _) => {
+                ui.colored_label(ui.visuals().error_fg_color, format!("{}: {e}", j.label));
+            }
+            (None, true) => {
+                ui.weak(format!("Saved: {}", j.label));
+            }
+            (None, false) => {
+                ui.add(
+                    egui::ProgressBar::new(j.fraction.unwrap_or(0.0))
+                        .desired_width(160.0)
+                        .show_percentage(),
+                );
+                ui.label(&j.label);
+            }
+        });
+    }
+    if let Some(c) = cmd {
+        app.engine.send(c);
+    }
 }
 
 fn empty(app: &mut App, ui: &mut egui::Ui) {
@@ -345,6 +534,15 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
                 });
         }
         ui.separator();
+        if ui
+            .toggle_value(&mut app.player_ui.trim.open, "Trim")
+            .changed()
+            && !app.player_ui.trim.open
+            && app.player_ui.trim.previewing
+        {
+            p.set_loop(None);
+            app.player_ui.trim.previewing = false;
+        }
         ui.toggle_value(&mut app.player_ui.show_meta, "Details");
         if ui.button("Fullscreen").clicked() {
             app.player_ui.fullscreen = !app.player_ui.fullscreen;

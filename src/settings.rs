@@ -53,7 +53,8 @@ impl Default for Settings {
             ui_scale: 1.0,
             start_with_os: false,
             start_minimised: false,
-            close_to_tray: true,
+            // Many Linux desktops show no tray icons, and a hidden window could not come back.
+            close_to_tray: !cfg!(target_os = "linux"),
             notifications: true,
         }
     }

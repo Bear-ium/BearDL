@@ -12,6 +12,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         appearance(app, ui);
         ui.add_space(12.0);
+        system(app, ui);
+        ui.add_space(12.0);
         super::presets_view::show(app, ui);
         ui.add_space(12.0);
         tools(app, ui);
@@ -127,6 +129,20 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
             );
         }
     }
+}
+
+fn system(app: &mut App, ui: &mut egui::Ui) {
+    let s = &mut app.settings;
+    ui.strong("System");
+    ui.checkbox(&mut s.start_with_os, "Start with the system (in the tray)");
+    ui.checkbox(
+        &mut s.close_to_tray,
+        "Closing the window keeps BearDL running in the tray, so subscriptions keep checking",
+    );
+    ui.checkbox(
+        &mut s.notifications,
+        "Notify when a subscription downloads something new",
+    );
 }
 
 fn import_export(app: &mut App, ui: &mut egui::Ui) {
