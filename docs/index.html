@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Download BearDL</title>
+<meta name="description" content="BearDL is a small native desktop app for yt-dlp. Download it for Windows, macOS or Linux.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232F7FD1'/%3E%3Cpath fill='%23fff' d='M27.5 11.5h9v24h9L32 46 18.5 35.5h9z'/%3E%3Crect fill='%23fff' x='16' y='50' width='32' height='5' rx='1'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="https://github.com/Bear-ium/BearDL">
+    <svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M27.5 11.5h9v24h9L32 46 18.5 35.5h9z"/><rect x="16" y="50" width="32" height="5" rx="1"/></svg>
+    BearDL
+  </a>
+  <nav>
+    <a href="https://github.com/Bear-ium/BearDL/releases">All releases</a>
+    <a href="https://github.com/Bear-ium/BearDL">Source code</a>
+  </nav>
+</header>
+
+<main>
+  <section class="hero">
+    <h1>A small, fast desktop app for yt-dlp</h1>
+    <p class="lede">Download video and audio from any site yt-dlp supports, keep a searchable library of everything you saved, and play it back without leaving the app. It is native, about 6 MB, and uses no CPU while idle.</p>
+
+    <a class="get" id="get" href="https://github.com/Bear-ium/BearDL/releases/latest">
+      <svg class="get-icon" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14"/><path d="M27.5 11.5h9v24h9L32 46 18.5 35.5h9z"/><rect x="16" y="50" width="32" height="5" rx="1"/></svg>
+      <span class="get-text">
+        <span class="get-title" id="get-title">Download BearDL</span>
+        <span class="get-detail" id="get-detail">Choose your system below</span>
+      </span>
+    </a>
+    <p class="note" id="note-mac-intel" hidden>Using a Mac with an Intel processor? <a href="https://github.com/Bear-ium/BearDL/releases/latest/download/beardl-macos-x86_64.tar.gz">Download the Intel build</a> instead.</p>
+    <p class="note" id="note-windows-arm" hidden>There is no Arm build for Windows yet. This x86_64 build runs under Windows’ own emulation.</p>
+    <p class="note" id="note-linux-arm" hidden>There is no Linux build for Arm yet. You can <a href="https://github.com/Bear-ium/BearDL#building">build BearDL from source</a>.</p>
+    <p class="note" id="note-mobile" hidden>BearDL is a desktop app for Windows, macOS and Linux.</p>
+  </section>
+
+  <section aria-labelledby="platforms">
+    <h2 id="platforms">Every download</h2>
+    <ul class="platforms">
+      <li data-os="windows" data-arch="x86_64">
+        <a href="https://github.com/Bear-ium/BearDL/releases/latest/download/beardl-windows-x86_64.zip">Windows</a>
+        <span>x86_64, Windows 10 1803 or later</span>
+        <code>beardl-windows-x86_64.zip</code>
+      </li>
+      <li data-os="macos" data-arch="aarch64">
+        <a href="https://github.com/Bear-ium/BearDL/releases/latest/download/beardl-macos-aarch64.tar.gz">macOS, Apple silicon</a>
+        <span>M1 and later, macOS 11 or later</span>
+        <code>beardl-macos-aarch64.tar.gz</code>
+      </li>
+      <li data-os="macos" data-arch="x86_64">
+        <a href="https://github.com/Bear-ium/BearDL/releases/latest/download/beardl-macos-x86_64.tar.gz">macOS, Intel</a>
+        <span>x86_64, macOS 11 or later</span>
+        <code>beardl-macos-x86_64.tar.gz</code>
+      </li>
+      <li data-os="linux" data-arch="x86_64">
+        <a href="https://github.com/Bear-ium/BearDL/releases/latest/download/beardl-linux-x86_64.tar.gz">Linux</a>
+        <span>x86_64, glibc, OpenGL 3</span>
+        <code>beardl-linux-x86_64.tar.gz</code>
+      </li>
+    </ul>
+    <p class="more">
+      <a href="https://github.com/Bear-ium/BearDL/releases/latest/download/SHA256SUMS">SHA256SUMS</a>
+      <a href="https://github.com/Bear-ium/BearDL/releases">All releases and release notes</a>
+      <a href="https://github.com/Bear-ium/BearDL">Source code</a>
+    </p>
+  </section>
+
+  <section aria-labelledby="first-launch">
+    <h2 id="first-launch">Opening it the first time</h2>
+    <p>BearDL is not signed with a paid developer certificate yet, so Windows and macOS warn you before the first launch. The steps below are needed once.</p>
+
+    <details data-os="windows">
+      <summary>Windows</summary>
+      <ol>
+        <li>Extract the zip and open <code>beardl.exe</code>.</li>
+        <li>If Windows SmartScreen says “Windows protected your PC”, select <strong>More info</strong>.</li>
+        <li>Select <strong>Run anyway</strong>.</li>
+      </ol>
+      <p>On Windows on Arm, the x86_64 build runs under Windows’ own emulation.</p>
+    </details>
+
+    <details data-os="macos">
+      <summary>macOS</summary>
+      <ol>
+        <li>Open the download to extract it. You get a <code>beardl</code> folder.</li>
+        <li>In Finder, right-click (or Control-click) <code>beardl</code> inside it and choose <strong>Open</strong>.</li>
+        <li>In the dialogue that follows, choose <strong>Open</strong> again.</li>
+      </ol>
+      <p>On macOS 15 and later that dialogue has no Open button. Try to open BearDL once, then go to System Settings, Privacy &amp; Security, and select <strong>Open Anyway</strong>. Or remove the quarantine flag in Terminal:</p>
+      <pre><code>xattr -d com.apple.quarantine beardl/beardl</code></pre>
+    </details>
+
+    <details data-os="linux">
+      <summary>Linux</summary>
+      <pre><code>tar -xzf beardl-linux-x86_64.tar.gz
+./beardl/beardl</code></pre>
+      <p>The build comes from a recent Ubuntu, so it needs a similarly recent glibc. On an older distribution, build it from source. You also need <code>curl</code> and <code>tar</code> with xz support. For a tray icon, use a desktop with StatusNotifierItem support, such as KDE, or GNOME with the AppIndicator extension.</p>
+    </details>
+  </section>
+
+  <section aria-labelledby="verify">
+    <h2 id="verify">Checking your download</h2>
+    <p>Each release lists the SHA-256 of every file in <code>SHA256SUMS</code>. Download it into the same folder as your download, then run:</p>
+    <dl class="commands">
+      <dt>Windows (PowerShell)</dt>
+      <dd><pre><code>Get-FileHash beardl-windows-x86_64.zip
+Select-String beardl-windows-x86_64.zip SHA256SUMS</code></pre>
+      The two hashes should match. PowerShell prints its hash in capitals.</dd>
+      <dt>macOS</dt>
+      <dd><pre><code>shasum -a 256 -c SHA256SUMS --ignore-missing</code></pre></dd>
+      <dt>Linux</dt>
+      <dd><pre><code>sha256sum -c SHA256SUMS --ignore-missing</code></pre></dd>
+    </dl>
+    <p>On macOS and Linux, a good file is reported as <code>OK</code>.</p>
+  </section>
+
+  <section aria-labelledby="tools">
+    <h2 id="tools">What BearDL fetches by itself</h2>
+    <p>The download contains only BearDL. On first run it downloads <strong>yt-dlp</strong>, and <strong>ffmpeg</strong> if your system has none, into its own data folder. Both are checked against their published checksums, and yt-dlp is kept up to date.</p>
+    <p>The built-in player needs <strong>libmpv</strong>. Without it, files open in your usual player.</p>
+    <ul class="plain">
+      <li><strong>Windows:</strong> select <strong>Download libmpv</strong> on the Player page. It takes one click.</li>
+      <li><strong>macOS:</strong> install it with Homebrew: <code>brew install mpv</code></li>
+      <li><strong>Linux:</strong> install your distribution’s package, for example <code>sudo apt install libmpv2</code> or <code>sudo dnf install mpv-libs</code></li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <p>BearDL is free and open source under the BSD Zero Clause licence. yt-dlp, ffmpeg and mpv keep their own licences.</p>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
