@@ -232,125 +232,127 @@ fn editor(app: &mut App, ui: &mut egui::Ui, subs: &[SubView], cmds: &mut Vec<Cmd
     };
     let id = *id;
     let mut close = false;
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.heading("Edit subscription");
-        egui::Grid::new("sub_edit")
-            .num_columns(2)
-            .spacing([10.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(name);
-                ui.end_row();
-                ui.label("URL");
-                ui.text_edit_singleline(url);
-                ui.end_row();
-                ui.label("Preset");
-                egui::ComboBox::from_id_salt("sub_preset")
-                    .selected_text(if cfg.preset.is_empty() {
-                        format!("Default ({default_preset})")
-                    } else {
-                        cfg.preset.clone()
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut cfg.preset, String::new(), "Default");
-                        for p in &presets {
-                            ui.selectable_value(&mut cfg.preset, p.clone(), p);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.heading("Edit subscription");
+            egui::Grid::new("sub_edit")
+                .num_columns(2)
+                .spacing([10.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(name);
+                    ui.end_row();
+                    ui.label("URL");
+                    ui.text_edit_singleline(url);
+                    ui.end_row();
+                    ui.label("Preset");
+                    egui::ComboBox::from_id_salt("sub_preset")
+                        .selected_text(if cfg.preset.is_empty() {
+                            format!("Default ({default_preset})")
+                        } else {
+                            cfg.preset.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut cfg.preset, String::new(), "Default");
+                            for p in &presets {
+                                ui.selectable_value(&mut cfg.preset, p.clone(), p);
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Folder");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut cfg.folder)
+                            .hint_text("sub-folder or absolute path"),
+                    );
+                    ui.end_row();
+                    ui.label("Max height");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut cfg.max_height).range(0..=8640));
+                        ui.weak("0 = preset");
+                    });
+                    ui.end_row();
+                    ui.label("Uploaded after");
+                    ui.add(egui::TextEdit::singleline(&mut cfg.date_after).hint_text("YYYYMMDD"));
+                    ui.end_row();
+                    ui.label("Title must contain");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut cfg.include)
+                            .hint_text("any of: word, other word"),
+                    );
+                    ui.end_row();
+                    ui.label("Skip titles with");
+                    ui.add(egui::TextEdit::singleline(&mut cfg.exclude).hint_text("#shorts, live"));
+                    ui.end_row();
+                    ui.label("Items per check");
+                    ui.add(egui::DragValue::new(&mut cfg.max_items).range(1..=500));
+                    ui.end_row();
+                    ui.label("Check every");
+                    ui.add(
+                        egui::DragValue::new(&mut cfg.interval_minutes)
+                            .range(5..=10_080)
+                            .suffix(" min"),
+                    );
+                    ui.end_row();
+                    ui.label("Subtitles");
+                    ui.horizontal(|ui| {
+                        for (v, l) in [
+                            (SubtitleChoice::Preset, "Preset"),
+                            (SubtitleChoice::On, "On"),
+                            (SubtitleChoice::Off, "Off"),
+                        ] {
+                            ui.selectable_value(&mut cfg.subtitles, v, l);
                         }
                     });
-                ui.end_row();
-                ui.label("Folder");
-                ui.add(
-                    egui::TextEdit::singleline(&mut cfg.folder)
-                        .hint_text("sub-folder or absolute path"),
-                );
-                ui.end_row();
-                ui.label("Max height");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut cfg.max_height).range(0..=8640));
-                    ui.weak("0 = preset");
+                    ui.end_row();
+                    ui.label("First check");
+                    ui.vertical(|ui| {
+                        ui.radio_value(
+                            &mut cfg.first_check,
+                            FirstCheck::Latest,
+                            "Download the newest items",
+                        );
+                        ui.radio_value(
+                            &mut cfg.first_check,
+                            FirstCheck::OnlyNew,
+                            "Only future uploads",
+                        );
+                    });
+                    ui.end_row();
                 });
-                ui.end_row();
-                ui.label("Uploaded after");
-                ui.add(egui::TextEdit::singleline(&mut cfg.date_after).hint_text("YYYYMMDD"));
-                ui.end_row();
-                ui.label("Title must contain");
-                ui.add(
-                    egui::TextEdit::singleline(&mut cfg.include)
-                        .hint_text("any of: word, other word"),
-                );
-                ui.end_row();
-                ui.label("Skip titles with");
-                ui.add(egui::TextEdit::singleline(&mut cfg.exclude).hint_text("#shorts, live"));
-                ui.end_row();
-                ui.label("Items per check");
-                ui.add(egui::DragValue::new(&mut cfg.max_items).range(1..=500));
-                ui.end_row();
-                ui.label("Check every");
-                ui.add(
-                    egui::DragValue::new(&mut cfg.interval_minutes)
-                        .range(5..=10_080)
-                        .suffix(" min"),
-                );
-                ui.end_row();
-                ui.label("Subtitles");
-                ui.horizontal(|ui| {
-                    for (v, l) in [
-                        (SubtitleChoice::Preset, "Preset"),
-                        (SubtitleChoice::On, "On"),
-                        (SubtitleChoice::Off, "Off"),
-                    ] {
-                        ui.selectable_value(&mut cfg.subtitles, v, l);
-                    }
-                });
-                ui.end_row();
-                ui.label("First check");
-                ui.vertical(|ui| {
-                    ui.radio_value(
-                        &mut cfg.first_check,
-                        FirstCheck::Latest,
-                        "Download the newest items",
-                    );
-                    ui.radio_value(
-                        &mut cfg.first_check,
-                        FirstCheck::OnlyNew,
-                        "Only future uploads",
-                    );
-                });
-                ui.end_row();
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    cmds.push(Cmd::UpdateSubscription {
+                        id,
+                        name: name.clone(),
+                        url: url.clone(),
+                        config: cfg.clone(),
+                    });
+                    close = true;
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
             });
-        ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
-                cmds.push(Cmd::UpdateSubscription {
-                    id,
-                    name: name.clone(),
-                    url: url.clone(),
-                    config: cfg.clone(),
-                });
-                close = true;
-            }
-            if ui.button("Close").clicked() {
-                close = true;
+            if let Some(v) = subs.iter().find(|v| v.sub.id == id) {
+                ui.add_space(8.0);
+                ui.strong("Recent checks");
+                if v.logs.is_empty() {
+                    ui.weak("None yet.");
+                }
+                for l in &v.logs {
+                    let col = if l.is_error {
+                        ui.visuals().error_fg_color
+                    } else {
+                        ui.visuals().text_color()
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.weak(format_timestamp(l.ts));
+                        ui.colored_label(col, &l.message);
+                    });
+                }
             }
         });
-        if let Some(v) = subs.iter().find(|v| v.sub.id == id) {
-            ui.add_space(8.0);
-            ui.strong("Recent checks");
-            if v.logs.is_empty() {
-                ui.weak("None yet.");
-            }
-            for l in &v.logs {
-                let col = if l.is_error {
-                    ui.visuals().error_fg_color
-                } else {
-                    ui.visuals().text_color()
-                };
-                ui.horizontal_wrapped(|ui| {
-                    ui.weak(format_timestamp(l.ts));
-                    ui.colored_label(col, &l.message);
-                });
-            }
-        }
-    });
     if close {
         app.subs.editing = None;
     }

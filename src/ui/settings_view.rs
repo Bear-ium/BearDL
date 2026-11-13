@@ -5,21 +5,24 @@ use crate::util::format_timestamp;
 use eframe::egui;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.heading("Settings");
-        ui.add_space(6.0);
-        general(app, ui);
-        ui.add_space(12.0);
-        appearance(app, ui);
-        ui.add_space(12.0);
-        system(app, ui);
-        ui.add_space(12.0);
-        super::presets_view::show(app, ui);
-        ui.add_space(12.0);
-        tools(app, ui);
-        ui.add_space(12.0);
-        import_export(app, ui);
-    });
+    // Fill the page, so the scroll bar sits at the window's edge rather than beside the content.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.heading("Settings");
+            ui.add_space(6.0);
+            general(app, ui);
+            ui.add_space(12.0);
+            appearance(app, ui);
+            ui.add_space(12.0);
+            system(app, ui);
+            ui.add_space(12.0);
+            super::presets_view::show(app, ui);
+            ui.add_space(12.0);
+            tools(app, ui);
+            ui.add_space(12.0);
+            import_export(app, ui);
+        });
 }
 
 fn general(app: &mut App, ui: &mut egui::Ui) {

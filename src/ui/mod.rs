@@ -453,11 +453,12 @@ impl eframe::App for App {
     }
 }
 
-/// The window covers 75% of the screen's width and 80% of its height, at least 960×600 points
-/// but never more than 95% of the screen.
+/// A 5:4 window, 80% of the screen's height: at least 900×640 points, but never more than 95%
+/// of the screen.
 pub fn window_size(monitor: egui::Vec2) -> egui::Vec2 {
-    egui::vec2(monitor.x * 0.75, monitor.y * 0.8)
-        .max(egui::vec2(960.0, 600.0))
+    let h = monitor.y * 0.8;
+    egui::vec2(h * 1.25, h)
+        .max(egui::vec2(900.0, 640.0))
         .min(monitor * 0.95)
 }
 
@@ -581,11 +582,13 @@ mod tests {
 
     #[test]
     fn window_takes_a_share_of_the_screen() {
-        assert_eq!(window_size(vec2(1920.0, 1080.0)), vec2(1440.0, 864.0));
-        assert_eq!(window_size(vec2(2560.0, 1440.0)), vec2(1920.0, 1152.0));
+        assert_eq!(window_size(vec2(1920.0, 1080.0)), vec2(1080.0, 864.0));
+        assert_eq!(window_size(vec2(2560.0, 1440.0)), vec2(1440.0, 1152.0));
+        // Ultrawide screens get the same shape, not a wider window.
+        assert_eq!(window_size(vec2(3440.0, 1440.0)), vec2(1440.0, 1152.0));
         // Small screens get the minimum, but never more than 95% of the screen.
-        assert_eq!(window_size(vec2(1280.0, 720.0)), vec2(960.0, 600.0));
+        assert_eq!(window_size(vec2(1280.0, 720.0)), vec2(900.0, 640.0));
         let tiny = window_size(vec2(1024.0, 576.0));
-        assert_eq!(tiny, vec2(960.0, 576.0 * 0.95));
+        assert_eq!(tiny, vec2(900.0, 576.0 * 0.95));
     }
 }
