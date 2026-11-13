@@ -323,6 +323,7 @@ pub fn apply(
         s.ytdlp_path = current.ytdlp_path.clone();
         s.ffmpeg_path = current.ffmpeg_path.clone();
         s.mpv_path = current.mpv_path.clone();
+        s.libmpv_path = current.libmpv_path.clone();
         // Where files are written is not taken from a file either.
         s.download_dir = current.download_dir.clone();
         s.output_template = current.output_template.clone();
@@ -535,6 +536,7 @@ mod tests {
         let settings = Settings {
             concurrency: 7,
             ffmpeg_path: "/evil/ffmpeg".into(),
+            libmpv_path: "/evil/libmpv.so".into(),
             ..Default::default()
         };
         let b = build(&src, &settings, &themes).unwrap();
@@ -560,6 +562,7 @@ mod tests {
         assert_eq!(s.concurrency, 7);
         assert_eq!(s.download_dir, std::path::PathBuf::from("/local"));
         assert_eq!(s.ffmpeg_path, "/local/ffmpeg", "tool paths never imported");
+        assert_eq!(s.libmpv_path, "", "the library path is never imported");
         assert_eq!(dst.presets().unwrap().len(), 2);
         assert_eq!(subscriptions(&dst).unwrap().len(), 2);
         assert!(dst_themes.join("mine.toml").is_file());

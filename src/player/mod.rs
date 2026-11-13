@@ -7,15 +7,31 @@ use eframe::glow::{self, HasContext};
 use ffi::{Mpv, cstr};
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 pub type GetProcAddress = Arc<dyn Fn(&CStr) -> *const c_void + Send + Sync>;
 
-static LIBMPV: OnceLock<Result<Arc<Mpv>, String>> = OnceLock::new();
+/// The loaded libmpv (or why it failed), with the Settings path it was loaded for.
+type Loaded = (String, Result<Arc<Mpv>, String>);
+static LIBMPV: Mutex<Option<Loaded>> = Mutex::new(None);
 
-/// libmpv, loaded once on first use.
-pub fn libmpv() -> Result<Arc<Mpv>, String> {
-    LIBMPV.get_or_init(|| Mpv::load().map(Arc::new)).clone()
+/// libmpv, loaded on first use and again when `custom` (the path from Settings) changes.
+pub fn libmpv(custom: &str) -> Result<Arc<Mpv>, String> {
+    let mut g = LIBMPV.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((key, r)) = g.as_ref()
+        && key == custom
+    {
+        return r.clone();
+    }
+    let r = Mpv::load(custom).map(Arc::new);
+    *g = Some((custom.to_owned(), r.clone()));
+    r
+}
+
+/// Makes the next [`libmpv`] call search again, for example after libmpv was installed.
+/// A player that is open keeps the library it has.
+pub fn forget_libmpv() {
+    *LIBMPV.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,8 +102,13 @@ unsafe extern "C" fn get_proc(ctx: *mut c_void, name: *const c_char) -> *mut c_v
 
 impl Player {
     /// Creates an mpv instance with an OpenGL render context on the current GL context.
-    pub fn new(ctx: &egui::Context, proc_address: GetProcAddress) -> Result<Player, String> {
-        let mpv = libmpv()?;
+    /// `custom` is the libmpv path from Settings, if any.
+    pub fn new(
+        ctx: &egui::Context,
+        proc_address: GetProcAddress,
+        custom: &str,
+    ) -> Result<Player, String> {
+        let mpv = libmpv(custom)?;
         // SAFETY: calls follow libmpv's documented order: create, set options, initialise,
         // then create the render context. Pointers passed in live as long as the Player.
         unsafe {
@@ -526,17 +547,13 @@ pub fn open_external(mpv_path: &str, file: &Path, start: Option<f64>) -> Result<
 }
 
 pub fn install_hint() -> String {
-    if cfg!(windows) {
-        "Install mpv to play here: put libmpv-2.dll (from the mpv-dev builds on \
-         sourceforge.net/projects/mpv-player-windows) next to BearDL.exe, or install mpv \
-         with `winget install mpv` or `scoop install mpv`."
-            .into()
-    } else if cfg!(target_os = "macos") {
-        "Install mpv to play here: `brew install mpv` (provides libmpv).".into()
-    } else {
-        "Install mpv to play here: your package manager's `libmpv2` (or `mpv-libs`) package, \
-         or `mpv` for the external player."
-            .into()
+    if crate::libmpv::downloadable() {
+        return "To play here, use Download libmpv on the Player page.".into();
+    }
+    let i = crate::libmpv::instructions();
+    match i.command {
+        Some(c) => format!("To play here: {} `{c}`", i.text),
+        None => format!("To play here: {}", i.text),
     }
 }
 
@@ -560,8 +577,13 @@ mod tests {
 
     #[test]
     fn missing_libmpv_is_an_error_not_a_crash() {
-        // With an override that does not exist, loading falls through to the system search;
-        // either outcome must be a clean Result.
-        let _ = libmpv();
+        // Whatever the system has, the outcome must be a clean Result.
+        let _ = libmpv("");
+        if std::env::var_os("BEARDL_LIBMPV").is_none() {
+            let missing = std::env::temp_dir().join("beardl-no-such-dir/libmpv-2.dll");
+            let e = libmpv(&missing.to_string_lossy()).err().unwrap();
+            assert!(e.contains("file not found"), "{e}");
+        }
+        forget_libmpv();
     }
 }

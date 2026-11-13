@@ -88,19 +88,32 @@ pub struct Mpv {
     pub render_context_free: unsafe extern "C" fn(*mut mpv_render_context),
 }
 
-/// Library names to try, most specific first. `BEARDL_LIBMPV` overrides them all.
-fn candidates() -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = Vec::new();
-    if let Some(p) = std::env::var_os("BEARDL_LIBMPV") {
-        v.push(PathBuf::from(p));
-    }
-    let names: &[&str] = if cfg!(windows) {
+/// A library the user chose: `BEARDL_LIBMPV`, else the path from Settings.
+fn chosen(custom: &str) -> Option<PathBuf> {
+    std::env::var_os("BEARDL_LIBMPV")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let c = custom.trim();
+            (!c.is_empty()).then(|| PathBuf::from(c))
+        })
+}
+
+/// Library file names, most specific first.
+fn names() -> &'static [&'static str] {
+    if cfg!(windows) {
         &["libmpv-2.dll", "mpv-2.dll", "mpv-1.dll"]
     } else if cfg!(target_os = "macos") {
         &["libmpv.2.dylib", "libmpv.dylib"]
     } else {
         &["libmpv.so.2", "libmpv.so.1", "libmpv.so"]
-    };
+    }
+}
+
+/// Library paths and names to try, most specific first.
+fn candidates() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    let names = names();
     // Next to the app and in the tools folder first, then the system search path.
     let mut dirs = Vec::new();
     if let Some(d) = std::env::current_exe()
@@ -135,9 +148,17 @@ macro_rules! sym {
 }
 
 impl Mpv {
-    /// Loads libmpv, or explains why it could not.
-    pub fn load() -> Result<Mpv, String> {
-        let mut last = String::from("libmpv not found");
+    /// Loads libmpv, or explains why it could not. A chosen library (see [`chosen`]) is the
+    /// only one tried.
+    pub fn load(custom: &str) -> Result<Mpv, String> {
+        if let Some(p) = chosen(custom) {
+            if !p.is_file() {
+                return Err(format!("{}: file not found", p.display()));
+            }
+            return Self::open(p);
+        }
+        // The first library that exists but cannot be used explains more than "not found".
+        let mut problem = None;
         for c in candidates() {
             let is_path = c.components().count() > 1;
             if is_path && !c.is_file() {
@@ -145,11 +166,36 @@ impl Mpv {
             }
             // SAFETY: loading a shared library runs its initialisers; libmpv's are benign.
             match unsafe { libloading::Library::new(&c) } {
-                Ok(lib) => return Self::from_lib(lib, c),
-                Err(e) => last = format!("{}: {e}", c.display()),
+                Ok(lib) => match Self::from_lib(lib, c.clone()) {
+                    Ok(m) => return Ok(m),
+                    Err(e) => {
+                        problem.get_or_insert(format!("{}: {e}", c.display()));
+                    }
+                },
+                // A bare name that does not load is almost always just not installed.
+                Err(e) if is_path => {
+                    problem.get_or_insert(format!("{}: {e}", c.display()));
+                }
+                Err(_) => {}
             }
         }
-        Err(last)
+        Err(problem.unwrap_or_else(|| {
+            format!(
+                "{} is not next to BearDL, in {} or on the system search path",
+                names()[0],
+                crate::paths::tools_dir().join("mpv").display()
+            )
+        }))
+    }
+
+    fn open(path: PathBuf) -> Result<Mpv, String> {
+        // SAFETY: loading a shared library runs its initialisers; libmpv's are benign.
+        match unsafe { libloading::Library::new(&path) } {
+            Ok(lib) => {
+                Self::from_lib(lib, path.clone()).map_err(|e| format!("{}: {e}", path.display()))
+            }
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
     }
 
     fn from_lib(lib: libloading::Library, path: PathBuf) -> Result<Mpv, String> {

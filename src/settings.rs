@@ -24,6 +24,8 @@ pub struct Settings {
     pub ffmpeg_path: String,
     /// Use this mpv executable for the external player fallback.
     pub mpv_path: String,
+    /// Use this libmpv for the embedded player instead of searching for one.
+    pub libmpv_path: String,
 
     pub theme: String,
     pub ui_scale: f32,
@@ -49,6 +51,7 @@ impl Default for Settings {
             ytdlp_path: String::new(),
             ffmpeg_path: String::new(),
             mpv_path: String::new(),
+            libmpv_path: String::new(),
             theme: "Dark".into(),
             ui_scale: 1.0,
             start_with_os: false,
@@ -93,6 +96,7 @@ impl Settings {
             &mut self.ytdlp_path,
             &mut self.ffmpeg_path,
             &mut self.mpv_path,
+            &mut self.libmpv_path,
         ] {
             *p = p.trim().trim_matches('"').trim().to_owned();
         }

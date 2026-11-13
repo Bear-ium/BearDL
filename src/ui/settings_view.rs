@@ -207,10 +207,13 @@ fn import_export(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn tools(app: &mut App, ui: &mut egui::Ui) {
-    ui.strong("yt-dlp and ffmpeg");
+    ui.strong("Tools");
     let t = app.engine.state().tools.clone();
     let paths = app.engine.state().paths.clone();
     let busy = t.busy.is_some();
+    let libmpv = crate::player::libmpv(&app.saved_settings.libmpv_path);
+    let custom_libmpv = !app.saved_settings.libmpv_path.is_empty()
+        || std::env::var_os("BEARDL_LIBMPV").is_some_and(|v| !v.is_empty());
     let mut cmds = Vec::new();
     let s = &mut app.settings;
     egui::Grid::new("tools")
@@ -360,6 +363,38 @@ fn tools(app: &mut App, ui: &mut egui::Ui) {
             ui.add(
                 egui::TextEdit::singleline(&mut s.ffmpeg_path)
                     .hint_text("path to ffmpeg; empty auto-detects")
+                    .desired_width(360.0),
+            );
+            ui.end_row();
+
+            ui.label("libmpv");
+            ui.vertical(|ui| match &libmpv {
+                Ok(m) => {
+                    let managed = crate::paths::tools_dir()
+                        .join("mpv")
+                        .join(crate::libmpv::DLL);
+                    let src = match &t.libmpv {
+                        _ if custom_libmpv => "custom".to_owned(),
+                        Some(i) if m.path == managed => format!("downloaded, build {}", i.version),
+                        _ => "found on this system".to_owned(),
+                    };
+                    ui.label(format!("Built-in player ready ({src})"));
+                    ui.weak(m.path.display().to_string());
+                }
+                Err(e) => {
+                    ui.colored_label(ui.visuals().warn_fg_color, "not found");
+                    ui.weak(e);
+                    if let Some(c) = super::player_view::libmpv_setup(&t, ui) {
+                        cmds.push(c);
+                    }
+                }
+            });
+            ui.end_row();
+
+            ui.label("Custom libmpv");
+            ui.add(
+                egui::TextEdit::singleline(&mut s.libmpv_path)
+                    .hint_text("path to the library; empty searches the usual places")
                     .desired_width(360.0),
             );
             ui.end_row();

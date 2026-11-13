@@ -14,6 +14,7 @@ Measurements on Windows 11, x86_64, release build. Cold start = launch to first 
 | M7 Subscriptions | done | 2026-11-13 | 5.51 MiB | 252 ms | 79.2 MiB private | 0 ms / 10 s |
 | M8 Trimming | done | 2026-11-13 | 5.55 MiB | 252 ms | 75.2 MiB private | 0 ms / 10 s |
 | M9 Hardening and size | done | 2026-11-13 | 5.56 MiB | 254 ms | 74.3 MiB private | 0 ms / 10 s |
+| libmpv download | done | 2026-11-14 | 5.72 MiB | 264 ms | 73.1 MiB private | 0 ms / 10 s |
 
 ## Features (checked against the real app, 2026-11-13)
 
@@ -43,7 +44,11 @@ Checked through live end-to-end tests (`tests/live.rs`, real yt-dlp, ffmpeg and 
 - [x] 11 Themes: TOML themes, built-in light and dark, live switching, user themes folder (screenshots).
 - [x] 12 Export and import: one JSON file, merge or replace (live round trip through the engine, plus unit tests).
 - [x] 13 Trimming: by time or chapter, preview loop, fast and accurate modes (live: 5.08 s keyframe-aligned clip and an exact 3.00 s clip).
+- [x] 14 libmpv download (Windows):
+  - Live through the engine: a download cancelled midway leaves nothing behind, then a full install is recorded in `state.toml` and the DLL loads.
+  - Live in the app (screenshots): with no libmpv anywhere, the Player page shows the button, then progress and Cancel. After the install the same process plays a video in the embedded player, with no restart.
+  - A partial download left by a killed process is replaced cleanly on the next attempt.
 
 ## Not verified here
 
-- macOS and Linux builds: only the Windows build was compiled and run. The tray-icon/ksni code, notification commands and autostart files for those platforms were written against their APIs and reviewed, but never compiled or run.
+- macOS and Linux builds: only the Windows build was linked and run. On 2026-11-14 all targets, tests included, passed clippy for Linux x86_64 and macOS arm64 and x86_64. That type-checks the tray-icon/ksni code, notification commands and autostart files, but nothing for those platforms has been linked or run yet. The CI workflow is the first place that happens.

@@ -57,11 +57,21 @@ yt-dlp and ffmpeg are not bundled. BearDL downloads them on first run into its d
   - To extract the yt-dlp archive: `unzip` or `python3`. Without either, BearDL falls back to the single-file build.
   - Optional: `notify-send` for notifications, and a desktop with StatusNotifierItem tray support (KDE, or GNOME with the AppIndicator extension).
 - **Embedded player (optional):** libmpv.
-  - Windows: put `libmpv-2.dll` next to `beardl.exe`, or in the `tools\mpv` folder inside BearDL's data folder. It comes from the "mpv-dev" builds linked on mpv.io.
+  - Windows: press **Download libmpv** on the Player page or in Settings, under Tools. Or put `libmpv-2.dll` next to `beardl.exe`.
   - macOS: `brew install mpv`.
   - Linux: install your distribution's `libmpv2` (or `mpv-libs`) package.
   
   Without libmpv, files open in an external `mpv`, or in your system player.
+
+## Network access
+
+Apart from the downloads you ask yt-dlp for, BearDL connects to the internet only for:
+
+- **yt-dlp**: installing it on first run and checking for updates, from the yt-dlp releases on GitHub.
+- **ffmpeg**: installing it when it is missing, or when you press its button. The builds come from yt-dlp's FFmpeg-Builds on GitHub, or from ffmpeg.martin-riedl.de on macOS.
+- **libmpv (Windows)**: only when you press **Download libmpv**. BearDL asks the GitHub API for the latest [mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake/releases) release, then downloads its `mpv-dev` archive from GitHub.
+
+yt-dlp and ffmpeg are checked against their published SHA-256 checksums, and libmpv against the SHA-256 that GitHub lists for the file. There is no telemetry.
 
 ## Building
 
@@ -122,7 +132,7 @@ cargo test
   ```
 - **Measurements:** `scripts/measure.ps1` measures binary size, cold start (launch to first painted frame), idle memory and idle CPU on Windows.
 
-`BEARDL_HOME=<folder>` keeps every file BearDL writes in one folder, which is useful for tests and portable use. `BEARDL_LIBMPV=<path>` points at a specific libmpv.
+`BEARDL_HOME=<folder>` keeps every file BearDL writes in one folder, which is useful for tests and portable use. `BEARDL_LIBMPV=<path>` points at a specific libmpv: only that file is tried, and it takes precedence over **Custom libmpv** in Settings.
 
 Project notes: `PLAN.md` (structure and data model), `DECISIONS.md` (choices and trade-offs) and `PROGRESS.md` (milestones and measurements).
 

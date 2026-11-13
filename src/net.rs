@@ -106,6 +106,16 @@ pub fn content_length(url: &str) -> Option<u64> {
 
 /// Downloads `url` to `dest`, reporting bytes written. Polls the file size while curl runs.
 pub fn download(url: &str, dest: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<()> {
+    download_cancellable(url, dest, progress, &AtomicBool::new(false))
+}
+
+/// [`download`] that also stops when `cancel` is set.
+pub fn download_cancellable(
+    url: &str,
+    dest: &Path,
+    progress: &dyn Fn(u64, Option<u64>),
+    cancel: &AtomicBool,
+) -> Result<()> {
     let total = content_length(url);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -116,7 +126,7 @@ pub fn download(url: &str, dest: &Path, progress: &dyn Fn(u64, Option<u64>)) -> 
     c.stderr(std::process::Stdio::piped());
     let mut child = c.spawn().context("could not run curl (is it installed?)")?;
     loop {
-        if CANCEL.load(Ordering::SeqCst) {
+        if CANCEL.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = std::fs::remove_file(dest);

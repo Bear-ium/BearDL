@@ -1,6 +1,8 @@
 //! Development aid (feature `dev-shots`): saves a screenshot after a delay and exits.
 //! `BEARDL_SHOT=<file.png>`, `BEARDL_SHOT_DELAY=<secs>`, `BEARDL_SHOT_PAGE=<page>`,
-//! `BEARDL_SHOT_URL=<url to analyse>`.
+//! `BEARDL_SHOT_URL=<url to analyse>`. `BEARDL_SHOT_LIBMPV=1` downloads libmpv at start, and
+//! with `BEARDL_SHOT_PLAY` plays the first library item once the player has picked it up.
+//! `BEARDL_SHOT_HEIGHT=<points>` makes the window taller, to show long pages.
 use eframe::egui;
 use std::io::Write;
 
@@ -14,6 +16,8 @@ pub struct Shots {
     pub play_first: bool,
     pub search: Option<String>,
     pub trim: bool,
+    pub libmpv: bool,
+    height: Option<f32>,
 }
 
 impl Shots {
@@ -35,10 +39,17 @@ impl Shots {
                 .ok()
                 .filter(|v| !v.is_empty()),
             trim: std::env::var("BEARDL_SHOT_TRIM").is_ok_and(|v| !v.is_empty()),
+            libmpv: std::env::var("BEARDL_SHOT_LIBMPV").is_ok_and(|v| !v.is_empty()),
+            height: std::env::var("BEARDL_SHOT_HEIGHT")
+                .ok()
+                .and_then(|s| s.parse().ok()),
         })
     }
 
     pub fn tick(&mut self, ctx: &egui::Context) {
+        if let Some(h) = self.height.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1100.0, h)));
+        }
         let now = ctx.input(|i| i.time);
         if !self.requested && now >= self.due {
             self.requested = true;

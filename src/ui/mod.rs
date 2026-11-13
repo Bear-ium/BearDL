@@ -263,7 +263,9 @@ impl App {
             if let Some(q) = s.search.clone() {
                 self.search.dev_set(&q);
             }
-            if s.play_first {
+            if s.libmpv {
+                self.engine.send(crate::engine::Cmd::InstallLibmpv);
+            } else if s.play_first {
                 self.lib.dev_play_first = true;
                 self.lib.dev_select_first = true;
             }
@@ -293,6 +295,10 @@ impl App {
             self.settings.start_with_os = self.saved_settings.start_with_os;
         }
         self.settings = self.settings.clone().sanitised();
+        if self.settings.libmpv_path != self.saved_settings.libmpv_path {
+            self.player_ui.reload = true;
+            ctx.request_repaint();
+        }
         if let Err(e) = self.settings.save() {
             self.push_toast(Level::Error, format!("Could not save settings: {e}"));
         }
@@ -475,10 +481,30 @@ impl App {
         }
         let ctx = ctx.clone();
         self.show_toasts(&ctx);
-        let (imported, themes_rev) = {
+        let (imported, themes_rev, libmpv_rev) = {
             let mut st = self.engine.state();
-            (st.imported_settings.take(), st.themes_rev)
+            (
+                st.imported_settings.take(),
+                st.themes_rev,
+                st.tools.libmpv_rev,
+            )
         };
+        if libmpv_rev != self.player_ui.libmpv_rev {
+            // A new libmpv was installed: the player picks it up on the next frame.
+            self.player_ui.libmpv_rev = libmpv_rev;
+            self.player_ui.reload = true;
+            ctx.request_repaint();
+            #[cfg(feature = "dev-shots")]
+            if self
+                .shots
+                .as_ref()
+                .is_some_and(|s| s.libmpv && s.play_first)
+            {
+                self.page = Page::Library;
+                self.lib.dev_play_first = true;
+                self.lib.dev_select_first = true;
+            }
+        }
         if let Some(s) = imported {
             self.settings = s;
         }

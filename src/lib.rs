@@ -5,6 +5,7 @@ pub mod db;
 pub mod engine;
 pub mod error;
 pub mod export;
+pub mod libmpv;
 pub mod net;
 pub mod paths;
 pub mod platform;

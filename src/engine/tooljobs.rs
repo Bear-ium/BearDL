@@ -1,7 +1,8 @@
 //! yt-dlp and ffmpeg maintenance jobs run on the blocking pool.
-use super::{Core, Done, Job, Level, Shared, ToolsView};
+use super::{Core, Done, Job, Level, LibmpvJob, Shared, ToolsView};
 use crate::tools::{Channel, Tools};
 use crate::util::unix_now;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 impl Core {
     /// Re-reads installed tools and their versions.
@@ -53,6 +54,10 @@ impl Core {
                     .then(|| st.ffmpeg_prev.as_ref().map(|i| i.version.clone()))
                     .flatten(),
                 last_check: st.last_check,
+                libmpv: st
+                    .libmpv
+                    .clone()
+                    .filter(|_| tools.managed_libmpv().is_some()),
                 ..Default::default()
             };
             (paths, view)
@@ -66,6 +71,9 @@ impl Core {
                     ffmpeg_latest: old.ffmpeg_latest,
                     busy: old.busy,
                     error: old.error,
+                    libmpv_job: old.libmpv_job,
+                    libmpv_error: old.libmpv_error,
+                    libmpv_rev: old.libmpv_rev,
                     last_check: view.last_check.max(old.last_check),
                     ..view
                 };
@@ -82,6 +90,12 @@ impl Core {
         if self.tools_busy.is_some() || wait_for_downloads {
             if !self.tool_queue.contains(&job) {
                 self.tool_queue.push_back(job);
+                if job == ToolJob::InstallLibmpv {
+                    self.shared.update(|s| {
+                        s.tools.libmpv_job = LibmpvJob::Waiting;
+                        s.tools.libmpv_error = None;
+                    });
+                }
                 if wait_for_downloads {
                     self.shared.update(|s| {
                         s.notify(
@@ -94,19 +108,27 @@ impl Core {
             return;
         }
         self.tools_busy = Some(job);
+        self.tool_cancel.store(false, Ordering::SeqCst);
+        let cancel = self.tool_cancel.clone();
         let tools = self.tools.clone();
         let shared = self.shared.clone();
         let done = self.done_tx.clone();
-        let channel = self.settings.ytdlp_channel;
-        let check_ffmpeg = self.shared.lock().tools.ffmpeg_managed;
-        // Automatic checks only speak up when there is something new.
-        let quiet = self.pending_auto;
+        let opts = JobOptions {
+            channel: self.settings.ytdlp_channel,
+            check_ffmpeg: self.shared.lock().tools.ffmpeg_managed,
+            // Automatic checks only speak up when there is something new.
+            quiet: self.pending_auto,
+        };
         shared.update(|s| {
             if matches!(job, ToolJob::Check) {
                 // Count the attempt, so an offline check retries after the interval, not at once.
                 s.tools.last_check = unix_now();
             }
             s.tools.error = None;
+            if job == ToolJob::InstallLibmpv {
+                s.tools.libmpv_job = LibmpvJob::Running;
+                s.tools.libmpv_error = None;
+            }
             s.tools.busy = Some(Job {
                 label: job.label().into(),
                 ..Default::default()
@@ -122,14 +144,29 @@ impl Core {
                     })
                 });
             };
-            let result = job.run(&tools, channel, check_ffmpeg, quiet, &progress, &shared);
+            let result = job.run(&tools, opts, &progress, &shared, &cancel);
+            let cancelled = cancel.load(Ordering::SeqCst);
             shared.update(|s| {
                 s.tools.busy = None;
+                if job == ToolJob::InstallLibmpv {
+                    s.tools.libmpv_job = LibmpvJob::Idle;
+                    match &result {
+                        Ok(_) => s.tools.libmpv_rev += 1,
+                        Err(e) if !cancelled => s.tools.libmpv_error = Some(e.to_string()),
+                        Err(_) => {}
+                    }
+                }
                 match result {
                     Ok(Some(msg)) => s.notify(Level::Info, msg),
                     Ok(None) => {}
+                    Err(_) if cancelled => {
+                        s.notify(Level::Info, format!("{}: cancelled", job.label()))
+                    }
                     Err(e) => {
-                        s.tools.error = Some(e.to_string());
+                        // libmpv shows its error next to its own button.
+                        if job != ToolJob::InstallLibmpv {
+                            s.tools.error = Some(e.to_string());
+                        }
                         s.notify(Level::Error, format!("{}: {e}", job.label()));
                     }
                 }
@@ -139,6 +176,14 @@ impl Core {
     }
 }
 
+/// Settings a tool job runs with, read when it starts.
+#[derive(Clone, Copy)]
+struct JobOptions {
+    channel: Channel,
+    check_ffmpeg: bool,
+    quiet: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum ToolJob {
     Check,
@@ -146,6 +191,7 @@ pub(super) enum ToolJob {
     RollbackYtdlp,
     InstallFfmpeg,
     RollbackFfmpeg,
+    InstallLibmpv,
 }
 
 impl ToolJob {
@@ -160,18 +206,23 @@ impl ToolJob {
             ToolJob::RollbackYtdlp => "Rolling back yt-dlp",
             ToolJob::InstallFfmpeg => "Installing ffmpeg",
             ToolJob::RollbackFfmpeg => "Rolling back ffmpeg",
+            ToolJob::InstallLibmpv => "Downloading libmpv",
         }
     }
 
     fn run(
         self,
         tools: &Tools,
-        channel: Channel,
-        check_ffmpeg: bool,
-        quiet: bool,
+        opts: JobOptions,
         progress: crate::tools::Progress,
         shared: &Shared,
+        cancel: &AtomicBool,
     ) -> crate::error::Result<Option<String>> {
+        let JobOptions {
+            channel,
+            check_ffmpeg,
+            quiet,
+        } = opts;
         match self {
             ToolJob::Check => {
                 let info = tools.check_ytdlp(channel)?;
@@ -228,6 +279,10 @@ impl ToolJob {
             ToolJob::RollbackFfmpeg => {
                 tools.rollback_ffmpeg()?;
                 Ok(Some("Rolled back to the previous ffmpeg".into()))
+            }
+            ToolJob::InstallLibmpv => {
+                let i = tools.install_libmpv(progress, cancel)?;
+                Ok(Some(format!("libmpv ({}) installed", i.version)))
             }
         }
     }

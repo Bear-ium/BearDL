@@ -17,6 +17,7 @@ use crate::util::unix_now;
 use crate::ytdlp::{Analysis, Preset};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -42,6 +43,9 @@ pub enum Cmd {
     RollbackYtdlp,
     InstallFfmpeg,
     RollbackFfmpeg,
+    /// Download libmpv for the embedded player (Windows).
+    InstallLibmpv,
+    CancelLibmpv,
     ApplySettings(Box<Settings>),
     Analyse(String),
     ClearAnalysis,
@@ -141,6 +145,21 @@ pub struct ToolsView {
     pub last_check: i64,
     pub busy: Option<Job>,
     pub error: Option<String>,
+    /// The downloaded libmpv, while its file is there.
+    pub libmpv: Option<crate::tools::Installed>,
+    pub libmpv_job: LibmpvJob,
+    pub libmpv_error: Option<String>,
+    /// Bumped by each libmpv install, so the player looks for the library again.
+    pub libmpv_rev: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LibmpvJob {
+    #[default]
+    Idle,
+    /// Queued behind another tool job.
+    Waiting,
+    Running,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -315,6 +334,8 @@ struct Core {
     done_rx: mpsc::UnboundedReceiver<Done>,
     tools_busy: Option<ToolJob>,
     tool_queue: VecDeque<ToolJob>,
+    /// Set to stop the running tool job's download.
+    tool_cancel: Arc<AtomicBool>,
     /// Auto-install the update found by the current check.
     pending_auto: bool,
     running: HashMap<i64, Running>,
@@ -364,6 +385,7 @@ impl Core {
             done_rx,
             tools_busy: None,
             tool_queue: VecDeque::new(),
+            tool_cancel: Arc::new(AtomicBool::new(false)),
             pending_auto: false,
             running: HashMap::new(),
             next_run: 0,
@@ -431,6 +453,8 @@ impl Core {
                 }
             }
         }
+        // A libmpv extraction in progress stops and deletes its partial file.
+        self.tool_cancel.store(true, Ordering::SeqCst);
         // Stop downloads; they resume on the next start. Give the tasks a moment to kill
         // their process trees (dropping them would too, via the process guards).
         let mut waiting = self.running.len();
@@ -621,6 +645,15 @@ impl Core {
             Cmd::RollbackYtdlp => self.spawn_tool_job(ToolJob::RollbackYtdlp),
             Cmd::InstallFfmpeg => self.spawn_tool_job(ToolJob::InstallFfmpeg),
             Cmd::RollbackFfmpeg => self.spawn_tool_job(ToolJob::RollbackFfmpeg),
+            Cmd::InstallLibmpv => self.spawn_tool_job(ToolJob::InstallLibmpv),
+            Cmd::CancelLibmpv => {
+                self.tool_queue.retain(|j| *j != ToolJob::InstallLibmpv);
+                if self.tools_busy == Some(ToolJob::InstallLibmpv) {
+                    self.tool_cancel.store(true, Ordering::SeqCst);
+                } else {
+                    self.shared.update(|s| s.tools.libmpv_job = LibmpvJob::Idle);
+                }
+            }
             Cmd::ApplySettings(s) => {
                 let tools_changed = s.ytdlp_path != self.settings.ytdlp_path
                     || s.ffmpeg_path != self.settings.ffmpeg_path;

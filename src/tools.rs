@@ -103,6 +103,8 @@ pub struct ToolState {
     pub ytdlp_prev: Option<Installed>,
     pub ffmpeg: Option<Installed>,
     pub ffmpeg_prev: Option<Installed>,
+    /// Downloaded libmpv (Windows). `version` is the release tag, `sha256` the archive's.
+    pub libmpv: Option<Installed>,
     pub last_check: i64,
     /// Checksum of a yt-dlp build the user rolled back from.
     pub rejected_sha: String,
@@ -248,6 +250,16 @@ impl Tools {
 
     pub fn managed_ffmpeg(&self) -> Option<PathBuf> {
         let p = self.ffmpeg_dir().join(exe_name("ffmpeg"));
+        p.is_file().then_some(p)
+    }
+
+    /// Where the downloaded libmpv goes; the player also looks here.
+    pub fn libmpv_dir(&self) -> PathBuf {
+        self.dir.join("mpv")
+    }
+
+    pub fn managed_libmpv(&self) -> Option<PathBuf> {
+        let p = self.libmpv_dir().join(crate::libmpv::DLL);
         p.is_file().then_some(p)
     }
 
@@ -540,7 +552,7 @@ fn make_executable(_p: &Path) -> Result<()> {
 }
 
 /// Renames with a few retries: antivirus scanners briefly lock freshly written files on Windows.
-fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut last = None;
     for _ in 0..10 {
         match std::fs::rename(from, to) {

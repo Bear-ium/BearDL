@@ -30,6 +30,11 @@ dev-shots = []
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_LibraryLoader"] }
+# Reads the libmpv .7z download: Windows 10's tar has no LZMA support.
+sevenz-rust2 = { version = "0.25.0", default-features = false }
+
+[target."cfg(windows)".dev-dependencies]
+sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["compress"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.191"

@@ -1,7 +1,7 @@
 //! Player page: embedded libmpv video with controls and a metadata panel.
 use super::App;
 use crate::db::Download;
-use crate::engine::Cmd;
+use crate::engine::{Cmd, LibmpvJob, ToolsView};
 use crate::player::{GetProcAddress, Player};
 use crate::util::{format_bytes, format_duration, format_upload_date};
 use eframe::egui;
@@ -34,6 +34,9 @@ pub struct PlayerUi {
     pub(crate) last_size: [i32; 2],
     /// Last position saved for resuming, and when.
     pub(crate) saved: (f64, f64),
+    /// Drop the player and look for libmpv again (it was installed, or its path changed).
+    pub(crate) reload: bool,
+    pub(crate) libmpv_rev: u64,
 }
 
 impl App {
@@ -62,6 +65,16 @@ impl App {
     /// `App::logic`, which also runs while the window is minimised or covered: mpv waits for
     /// each frame to be rendered, so it must keep being fed even when nothing is shown.
     pub(crate) fn drive_player(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if std::mem::take(&mut self.player_ui.reload) {
+            self.save_resume();
+            if let (Some(p), Some(gl)) = (self.player_ui.player.as_mut(), frame.gl()) {
+                p.free_gl(gl);
+            }
+            self.player_ui.player = None;
+            self.player_ui.current = None;
+            self.player_ui.error = None;
+            crate::player::forget_libmpv();
+        }
         if let Some((d, start)) = self.player_ui.pending.take() {
             self.start_playback(ctx, d, start);
         }
@@ -109,10 +122,12 @@ impl App {
         self.save_resume();
         if self.player_ui.player.is_none() && self.player_ui.error.is_none() {
             match self.player_ui.gl_proc.clone() {
-                Some(proc_address) => match Player::new(ctx, proc_address) {
-                    Ok(p) => self.player_ui.player = Some(p),
-                    Err(e) => self.player_ui.error = Some(e),
-                },
+                Some(proc_address) => {
+                    match Player::new(ctx, proc_address, &self.saved_settings.libmpv_path) {
+                        Ok(p) => self.player_ui.player = Some(p),
+                        Err(e) => self.player_ui.error = Some(e),
+                    }
+                }
                 None => self.player_ui.error = Some("no OpenGL context".into()),
             }
         }
@@ -145,11 +160,12 @@ impl App {
                     Ok(m) => format!("{m} (embedded player unavailable: {why})"),
                     Err(_) => {
                         let opened = crate::util::open_path(&file);
-                        let hint = if crate::player::libmpv().is_ok() {
-                            String::new()
-                        } else {
-                            format!(" {}", crate::player::install_hint())
-                        };
+                        let hint =
+                            if crate::player::libmpv(&self.saved_settings.libmpv_path).is_ok() {
+                                String::new()
+                            } else {
+                                format!(" {}", crate::player::install_hint())
+                            };
                         match opened {
                             Ok(()) => format!(
                                 "Opened in the default player (embedded player unavailable: {why}).{hint}"
@@ -390,20 +406,106 @@ fn empty(app: &mut App, ui: &mut egui::Ui) {
     ui.heading("Player");
     ui.weak("Nothing playing. Double-click an item in the Library, or press Enter on it.");
     ui.add_space(8.0);
-    match crate::player::libmpv() {
+    match crate::player::libmpv(&app.saved_settings.libmpv_path) {
         Ok(m) => {
             ui.weak(format!("libmpv: {}", m.path.display()));
         }
         Err(e) => {
-            ui.colored_label(ui.visuals().warn_fg_color, "libmpv is not available");
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "The built-in player needs libmpv, which was not found.",
+            );
             ui.weak(e);
-            ui.add(egui::Label::new(crate::player::install_hint()).wrap());
+            ui.add_space(4.0);
+            let tools = app.engine.state().tools.clone();
+            if let Some(cmd) = libmpv_setup(&tools, ui) {
+                app.engine.send(cmd);
+            }
+            ui.add_space(4.0);
             ui.weak("Until then, files open in an external mpv or the system player.");
         }
     }
     if let Some(e) = &app.player_ui.error {
         ui.colored_label(ui.visuals().error_fg_color, e);
     }
+}
+
+/// How to get libmpv: on Windows the download button, its progress and any error; elsewhere
+/// the package manager command. Returns the command for a button that was pressed.
+pub(super) fn libmpv_setup(t: &ToolsView, ui: &mut egui::Ui) -> Option<Cmd> {
+    if !crate::libmpv::downloadable() {
+        let i = crate::libmpv::instructions();
+        ui.add(egui::Label::new(i.text).wrap());
+        if let Some(command) = i.command {
+            ui.horizontal(|ui| {
+                ui.code(command);
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(command.to_owned());
+                }
+            });
+        }
+        return None;
+    }
+    let mut cmd = None;
+    match t.libmpv_job {
+        LibmpvJob::Idle => {
+            if ui
+                .button("Download libmpv")
+                .on_hover_text(format!(
+                    "Downloads about 30 MB from {} and keeps only {}",
+                    crate::libmpv::RELEASES,
+                    crate::libmpv::DLL
+                ))
+                .clicked()
+            {
+                cmd = Some(Cmd::InstallLibmpv);
+            }
+        }
+        LibmpvJob::Waiting => {
+            ui.horizontal(|ui| {
+                ui.label("Waiting for another download to finish");
+                if ui.button("Cancel").clicked() {
+                    cmd = Some(Cmd::CancelLibmpv);
+                }
+            });
+        }
+        LibmpvJob::Running => {
+            ui.horizontal(|ui| {
+                let job = t.busy.clone().unwrap_or_default();
+                match job.total.filter(|t| *t > 0) {
+                    Some(total) => {
+                        ui.add(
+                            egui::ProgressBar::new(job.done as f32 / total as f32)
+                                .desired_width(180.0)
+                                .show_percentage(),
+                        );
+                        ui.label(format!(
+                            "{} {} / {}",
+                            job.label,
+                            format_bytes(job.done),
+                            format_bytes(total)
+                        ));
+                    }
+                    None => {
+                        ui.label(format!("{}…", job.label));
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    cmd = Some(Cmd::CancelLibmpv);
+                }
+            });
+        }
+    }
+    if let Some(e) = &t.libmpv_error {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("The download failed: {e}"))
+                    .color(ui.visuals().error_fg_color),
+            )
+            .wrap(),
+        );
+    }
+    cmd
 }
 
 fn toggle_fullscreen(app: &mut App, ctx: &egui::Context) {

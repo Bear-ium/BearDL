@@ -566,3 +566,57 @@ fn export_then_import_through_the_engine() {
         "imported subscription listed"
     );
 }
+
+/// The libmpv download through the engine: cancel one mid-download, then install, then load it.
+#[cfg(windows)]
+#[test]
+#[ignore]
+fn libmpv_download_cancel_and_install() {
+    use beardl::engine::LibmpvJob;
+    let h = home("libmpv");
+    let engine = start(&h);
+    let tools = h.join("tools");
+    let dll = tools.join("mpv").join(beardl::libmpv::DLL);
+
+    engine.send(Cmd::InstallLibmpv);
+    wait("the libmpv download to start", 300, || {
+        let st = engine.state();
+        st.tools.libmpv_job == LibmpvJob::Running
+            && st
+                .tools
+                .busy
+                .as_ref()
+                .is_some_and(|b| b.label == "Downloading libmpv" && b.done > 0)
+    });
+    engine.send(Cmd::CancelLibmpv);
+    wait("the cancel", 60, || {
+        engine.state().tools.libmpv_job == LibmpvJob::Idle
+    });
+    {
+        let st = engine.state();
+        assert_eq!(st.tools.libmpv_error, None, "a cancel is not an error");
+        assert_eq!(st.tools.libmpv_rev, 0);
+    }
+    assert!(!dll.exists());
+    assert!(!dll.with_extension("dll.part").exists());
+    assert!(!tools.join("mpv.download").exists());
+
+    engine.send(Cmd::InstallLibmpv);
+    wait("the libmpv install", 600, || {
+        engine.state().tools.libmpv_rev == 1
+    });
+    let st = engine.state().tools.clone();
+    assert_eq!(st.libmpv_error, None);
+    assert_eq!(st.libmpv_job, LibmpvJob::Idle);
+    let installed = st.libmpv.expect("recorded in the tool state");
+    assert_eq!(installed.sha256.len(), 64);
+    assert!(installed.asset.starts_with("mpv-dev-x86_64-"));
+    assert!(!tools.join("mpv.download").exists());
+    let names: Vec<_> = std::fs::read_dir(tools.join("mpv"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [beardl::libmpv::DLL]);
+    let m = beardl::player::libmpv(&dll.to_string_lossy()).expect("the DLL loads");
+    assert_eq!(m.path, dll);
+}
