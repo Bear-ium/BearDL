@@ -1,0 +1,17 @@
+[package]
+name = "beardl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "x11", "wayland", "clipboard"] }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[features]
+bundled-fonts = ["eframe/default_fonts"]
