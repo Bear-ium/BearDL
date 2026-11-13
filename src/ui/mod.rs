@@ -82,6 +82,10 @@ pub struct App {
     themes_rev: u64,
     pub(crate) export_path: String,
     pub(crate) confirm_replace: bool,
+    /// Interface scale while its slider is being dragged.
+    pub(crate) scale_draft: Option<f32>,
+    /// The window has been sized to the screen.
+    window_fitted: bool,
     #[cfg(feature = "dev-shots")]
     shots: Option<shots::Shots>,
 }
@@ -143,6 +147,8 @@ impl App {
                 .display()
                 .to_string(),
             confirm_replace: false,
+            scale_draft: None,
+            window_fitted: false,
             #[cfg(feature = "dev-shots")]
             shots: shots::Shots::from_env(),
         }
@@ -416,6 +422,7 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.fit_window(ctx);
         self.handle_os(ctx);
         self.drive_player(ctx, frame);
     }
@@ -446,7 +453,41 @@ impl eframe::App for App {
     }
 }
 
+/// The window covers 75% of the screen's width and 80% of its height, at least 960×600 points
+/// but never more than 95% of the screen.
+pub fn window_size(monitor: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(monitor.x * 0.75, monitor.y * 0.8)
+        .max(egui::vec2(960.0, 600.0))
+        .min(monitor * 0.95)
+}
+
 impl App {
+    /// Sizes the window to the screen once its size is known. The first frame is drawn before
+    /// eframe shows the window, so the window appears at this size. It stays centred where
+    /// eframe placed it.
+    fn fit_window(&mut self, ctx: &egui::Context) {
+        if self.window_fitted {
+            return;
+        }
+        let (monitor, inner, outer) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.monitor_size, v.inner_rect, v.outer_rect)
+        });
+        let Some(monitor) = monitor.filter(|m| m.x > 0.0 && m.y > 0.0) else {
+            return;
+        };
+        self.window_fitted = true;
+        let size = window_size(monitor);
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        if let (Some(inner), Some(outer)) = (inner, outer) {
+            let frame = outer.size() - inner.size();
+            let pos = outer.center() - (size + frame) / 2.0;
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                pos.max(egui::Pos2::ZERO),
+            ));
+        }
+    }
+
     fn side_panels(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("nav")
             .resizable(false)
@@ -530,5 +571,21 @@ impl App {
                 ctx.request_repaint();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_size;
+    use eframe::egui::vec2;
+
+    #[test]
+    fn window_takes_a_share_of_the_screen() {
+        assert_eq!(window_size(vec2(1920.0, 1080.0)), vec2(1440.0, 864.0));
+        assert_eq!(window_size(vec2(2560.0, 1440.0)), vec2(1920.0, 1152.0));
+        // Small screens get the minimum, but never more than 95% of the screen.
+        assert_eq!(window_size(vec2(1280.0, 720.0)), vec2(960.0, 600.0));
+        let tiny = window_size(vec2(1024.0, 576.0));
+        assert_eq!(tiny, vec2(960.0, 576.0 * 0.95));
     }
 }

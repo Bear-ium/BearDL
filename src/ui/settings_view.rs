@@ -111,11 +111,30 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.end_row();
             ui.label("Interface scale");
-            ui.add(
-                egui::Slider::new(&mut app.settings.ui_scale, 0.75..=2.0)
-                    .step_by(0.05)
-                    .fixed_decimals(2),
-            );
+            ui.horizontal(|ui| {
+                ui.spacing_mut().slider_width = 200.0;
+                let mut scale = app.scale_draft.unwrap_or(app.settings.ui_scale);
+                // Zooming moves the slider under the pointer, so a drag only applies on release.
+                let r = ui.add(
+                    egui::Slider::new(&mut scale, 0.75..=2.0)
+                        .step_by(0.05)
+                        .show_value(false),
+                );
+                scale = (scale * 20.0).round() / 20.0;
+                if r.dragged() {
+                    app.scale_draft = Some(scale);
+                } else if app.scale_draft.take().is_some() || r.changed() {
+                    app.settings.ui_scale = scale;
+                }
+                ui.label(format!("{:.0}%", scale * 100.0));
+                if app.scale_draft.is_some() {
+                    ui.weak("applies when you let go");
+                } else if (app.settings.ui_scale - 1.0).abs() > 0.001
+                    && ui.button("Reset").on_hover_text("Back to 100%").clicked()
+                {
+                    app.settings.ui_scale = 1.0;
+                }
+            });
             ui.end_row();
         });
     for u in &app.user_themes {

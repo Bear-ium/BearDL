@@ -10,9 +10,12 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("BearDL")
+            // Resized to a share of the screen on the first frame (see `App::fit_window`).
             .with_inner_size([1100.0, 700.0])
-            .with_min_inner_size([640.0, 400.0])
+            .with_resizable(false)
+            .with_maximize_button(false)
             .with_icon(beardl::platform::window_icon()),
+        centered: true,
         ..Default::default()
     };
     eframe::run_native(
