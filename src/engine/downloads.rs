@@ -79,6 +79,7 @@ pub(super) enum Outcome {
     Finished {
         meta: Option<Meta>,
         file: Option<String>,
+        thumb: Option<String>,
         subs: Option<Value>,
         skipped: Option<String>,
     },
@@ -676,12 +677,13 @@ impl Core {
             Outcome::Finished {
                 meta,
                 file,
+                thumb,
                 subs,
                 skipped,
             } => {
                 self.partials.remove(&id);
                 if let Some(m) = &meta {
-                    self.store_meta(id, m);
+                    self.store_meta(id, m, file.as_deref(), thumb.as_deref());
                 }
                 match &file {
                     None => {
@@ -704,7 +706,7 @@ impl Core {
                                 q.progress.stage.clear();
                             }
                         });
-                        self.after_download(id, meta.as_ref(), subs);
+                        self.after_download(id, thumb.as_deref(), subs);
                     }
                 }
                 self.shared.update(|s| s.library_rev += 1);
@@ -717,12 +719,16 @@ impl Core {
     }
 
     /// Post-download work off the engine thread: the small list thumbnail.
-    fn after_download(&mut self, _id: i64, meta: Option<&Meta>, _subs: Option<Value>) {
+    fn after_download(&mut self, id: i64, _thumb: Option<&str>, _subs: Option<Value>) {
         let ffmpeg = self.shared.lock().paths.ffmpeg.clone();
-        if let (Some(m), Some(ff)) = (meta, ffmpeg) {
-            let thumb = self
-                .thumbs_dir
-                .join(format!("{}-{}.jpg", m.extractor_key, m.id));
+        let thumb = self
+            .db
+            .as_ref()
+            .and_then(|db| db.get_download(id).ok().flatten())
+            .map(|d| d.thumb_path)
+            .filter(|t| !t.is_empty());
+        if let (Some(thumb), Some(ff)) = (thumb, ffmpeg) {
+            let thumb = PathBuf::from(thumb);
             if thumb.is_file() {
                 let shared = self.shared.clone();
                 tokio::task::spawn_blocking(move || {
@@ -734,8 +740,13 @@ impl Core {
         }
     }
 
-    fn store_meta(&mut self, id: i64, m: &Meta) {
+    fn store_meta(&mut self, id: i64, m: &Meta, file: Option<&str>, thumb: Option<&str>) {
         let Some(db) = &self.db else { return };
+        // The extension after conversion or merging, not the one yt-dlp started with.
+        let ext = file
+            .and_then(|f| Path::new(f).extension())
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_else(|| m.ext.clone());
         let d = Download {
             video_id: m.id.clone(),
             extractor: m.extractor_key.clone(),
@@ -747,7 +758,7 @@ impl Core {
             description: m.description.clone(),
             thumbnail_url: m.thumbnail.clone(),
             chapters_json: m.chapters_json.clone(),
-            format_note: [m.resolution.as_str(), m.ext.as_str()]
+            format_note: [m.resolution.as_str(), ext.as_str()]
                 .iter()
                 .filter(|s| !s.is_empty())
                 .copied()
@@ -756,9 +767,14 @@ impl Core {
             ..Default::default()
         };
         let _ = db.update_meta(id, &d);
-        let thumb = self
-            .thumbs_dir
-            .join(format!("{}-{}.jpg", m.extractor_key, m.id));
+        // yt-dlp reports where it wrote the thumbnail (its file name is sanitised).
+        let thumb = thumb
+            .map(PathBuf::from)
+            .filter(|t| t.is_file() && t.extension().is_some_and(|e| e == "jpg"))
+            .unwrap_or_else(|| {
+                self.thumbs_dir
+                    .join(format!("{}-{}.jpg", m.extractor_key, m.id))
+            });
         if thumb.is_file() {
             let _ = db.set_thumb(id, &thumb.to_string_lossy());
         }
@@ -777,16 +793,21 @@ impl Core {
             let Ok(Some(d)) = db.get_download(id) else {
                 continue;
             };
-            if delete_files && !d.file_path.is_empty() {
+            // Only files no remaining entry points at (re-downloads share paths).
+            let shared = |p: &str| db.file_refs(p, &ids).unwrap_or(1) > 0;
+            if delete_files && d.status == Some(Status::Done) && !d.file_path.is_empty() {
                 let p = Path::new(&d.file_path);
-                if p.exists() && std::fs::remove_file(p).is_err() {
+                if p.is_file() && !shared(&d.file_path) && std::fs::remove_file(p).is_err() {
                     failed += 1;
                 }
             }
-            if !d.thumb_path.is_empty() {
+            if !d.thumb_path.is_empty() && !shared(&d.thumb_path) {
                 let t = Path::new(&d.thumb_path);
-                let _ = std::fs::remove_file(crate::thumbs::small_path(t));
-                let _ = std::fs::remove_file(t);
+                // Only cached thumbnails are removed, never anything outside the cache.
+                if t.starts_with(&self.thumbs_dir) {
+                    let _ = std::fs::remove_file(crate::thumbs::small_path(t));
+                    let _ = std::fs::remove_file(t);
+                }
             }
         }
         let res = db.delete_downloads(&ids);
@@ -855,21 +876,29 @@ impl Core {
         let mut missing = 0;
         let mut relinked = 0;
         let mut flags = Vec::new();
+        let _ = db.conn.execute_batch("BEGIN");
         for c in &changes {
-            match &c.new_path {
-                Some(p) => {
-                    let size = std::fs::metadata(p).ok().map(|m| m.len() as i64);
-                    let _ = db.set_file(c.id, &p.to_string_lossy(), size);
+            let new = c
+                .new_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            match new {
+                // Never re-link to a file another entry already owns.
+                Some(p) if db.file_refs(&p, &[c.id]).unwrap_or(1) == 0 => {
+                    let size = std::fs::metadata(&p).ok().map(|m| m.len() as i64);
+                    let _ = db.set_file(c.id, &p, size);
                     relinked += 1;
                 }
-                None => {
-                    flags.push((c.id, c.missing));
-                    if c.missing {
+                _ => {
+                    let gone = c.missing || c.new_path.is_some();
+                    flags.push((c.id, gone));
+                    if gone {
                         missing += 1;
                     }
                 }
             }
         }
+        let _ = db.conn.execute_batch("COMMIT");
         let _ = db.set_missing(&flags);
         self.shared.update(|s| {
             s.library_rev += 1;
@@ -894,11 +923,12 @@ pub(super) struct ScanChange {
     pub new_path: Option<PathBuf>,
 }
 
-/// Compares stored paths with the disk. Only changes are returned.
-pub(super) fn scan(files: &[(i64, String, bool)], root: &Path) -> Vec<ScanChange> {
+/// Compares stored paths with the disk. Only changes are returned. A missing file is
+/// matched to a file of the same name and the same size under the download folder.
+pub(super) fn scan(files: &[crate::db::FileRow], root: &Path) -> Vec<ScanChange> {
     let mut changes = Vec::new();
     let mut index: Option<std::collections::HashMap<std::ffi::OsString, PathBuf>> = None;
-    for (id, path, was_missing) in files {
+    for (id, path, was_missing, size) in files {
         let p = Path::new(path);
         if p.exists() {
             if *was_missing {
@@ -911,7 +941,14 @@ pub(super) fn scan(files: &[(i64, String, bool)], root: &Path) -> Vec<ScanChange
             continue;
         }
         let idx = index.get_or_insert_with(|| index_dir(root, 4, 200_000));
-        let found = p.file_name().and_then(|n| idx.get(n)).cloned();
+        let found = p
+            .file_name()
+            .and_then(|n| idx.get(n))
+            .filter(|f| {
+                let actual = std::fs::metadata(f).ok().map(|m| m.len() as i64);
+                size.is_some() && actual == *size
+            })
+            .cloned();
         if found.is_some() || !*was_missing {
             changes.push(ScanChange {
                 id: *id,
@@ -938,12 +975,13 @@ fn index_dir(
             if map.len() >= limit {
                 return map;
             }
+            // file_type() does not follow links, so symlinks and junctions are skipped.
             let Ok(t) = e.file_type() else { continue };
             if t.is_dir() {
                 if d < depth {
                     stack.push((e.path(), d + 1));
                 }
-            } else {
+            } else if t.is_file() {
                 map.entry(e.file_name()).or_insert_with(|| e.path());
             }
         }
@@ -1020,6 +1058,7 @@ struct RunState {
     meta: Option<Meta>,
     filename: Option<String>,
     file: Option<String>,
+    thumb: Option<String>,
     subs: Option<Value>,
     errors: Vec<String>,
     tail: Vec<String>,
@@ -1099,6 +1138,7 @@ impl RunState {
                 self.meta = Some(m);
             }
             Line::File(f) => self.file = Some(f),
+            Line::Thumb(t) => self.thumb = Some(t),
             Line::Subs(v) => self.subs = Some(*v),
             Line::Error(e) => self.errors.push(e),
             Line::Other => {
@@ -1183,6 +1223,7 @@ async fn run_download(
         return Outcome::Finished {
             meta: st.meta,
             file: st.file,
+            thumb: st.thumb,
             subs: st.subs,
             skipped: st.skipped.or(filtered.then(|| "filtered out".to_owned())),
         };
@@ -1279,27 +1320,21 @@ mod tests {
         let here = root.join("here.mp4");
         std::fs::write(&here, "x").unwrap();
         std::fs::write(root.join("sub/moved.mp4"), "x").unwrap();
+        let s = |p: std::path::PathBuf, missing: bool, size: i64| {
+            (p.to_string_lossy().into_owned(), missing, Some(size))
+        };
+        let row = |id: i64, (p, m, sz): (String, bool, Option<i64>)| (id, p, m, sz);
+        std::fs::write(root.join("sub/other.mp4"), "different size").unwrap();
         let files = vec![
-            (1, here.to_string_lossy().into_owned(), false),
-            (
-                2,
-                root.join("old/moved.mp4").to_string_lossy().into_owned(),
-                false,
-            ),
-            (
-                3,
-                root.join("gone.mp4").to_string_lossy().into_owned(),
-                false,
-            ),
-            (
-                4,
-                root.join("gone2.mp4").to_string_lossy().into_owned(),
-                true,
-            ),
-            (5, here.to_string_lossy().into_owned(), true),
+            row(1, s(here.clone(), false, 1)),
+            row(2, s(root.join("old/moved.mp4"), false, 1)),
+            row(3, s(root.join("gone.mp4"), false, 1)),
+            row(4, s(root.join("gone2.mp4"), true, 1)),
+            row(5, s(here.clone(), true, 1)),
+            row(6, s(root.join("x/other.mp4"), true, 1)),
         ];
         let ch = scan(&files, &root);
-        assert_eq!(ch.len(), 3);
+        assert_eq!(ch.len(), 3, "{ch:?}");
         assert_eq!(ch[0].id, 2);
         assert!(ch[0].new_path.as_ref().unwrap().ends_with("moved.mp4"));
         assert_eq!(

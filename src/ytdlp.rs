@@ -184,6 +184,7 @@ pub const POSTPROCESS_PREFIX: &str = "[bdlpp]";
 pub const META_PREFIX: &str = "[bdlmeta]";
 pub const FILE_PREFIX: &str = "[bdlfile]";
 pub const SUBS_PREFIX: &str = "[bdlsubs]";
+pub const THUMB_PREFIX: &str = "[bdlthumb]";
 
 const META_FIELDS: &str = "id,title,channel,uploader,channel_id,uploader_id,duration,upload_date,\
 description,thumbnail,webpage_url,original_url,extractor_key,chapters,format_id,resolution,ext,filename";
@@ -291,6 +292,37 @@ pub fn validate_custom_args(s: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
+/// Options that make yt-dlp run other programs or load code. Allowed in presets the user
+/// writes, but stripped from presets that come from an imported file.
+const RUNS_CODE: &[&str] = &[
+    "--exec",
+    "--exec-before-download",
+    "--netrc-cmd",
+    "--plugin-dirs",
+    "--use-postprocessor",
+    "--downloader",
+    "--external-downloader",
+    "--ffmpeg-location",
+    "--config-location",
+    "--config-locations",
+];
+
+/// The first option in `args` that runs a program or loads code, if any. Unique prefixes
+/// count, as yt-dlp accepts them. Unparseable input counts as unsafe.
+pub fn command_running_option(args: &str) -> Option<String> {
+    let Some(list) = split_args(args) else {
+        return Some("unparseable arguments".into());
+    };
+    list.iter().find_map(|a| {
+        let long = a.strip_prefix("--")?;
+        let name = format!("--{}", long.split('=').next().unwrap_or(long));
+        RUNS_CODE
+            .iter()
+            .find(|r| name.len() > 3 && r.starts_with(name.as_str()))
+            .map(|r| (*r).to_owned())
+    })
+}
+
 /// URL that yt-dlp rejects without touching the network.
 pub const VALIDATION_URL: &str = "beardl:validate";
 
@@ -378,6 +410,10 @@ pub fn download_args(job: &Job) -> Vec<String> {
     push(&format!("after_move:{FILE_PREFIX}%(filepath)s"));
     push("--print");
     push(&format!("after_move:{SUBS_PREFIX}%(requested_subtitles)j"));
+    push("--print");
+    push(&format!(
+        "after_move:{THUMB_PREFIX}%(thumbnails.-1.filepath)s"
+    ));
 
     let folder = o.folder.trim();
     let dir = if folder.is_empty() {
@@ -524,6 +560,7 @@ pub enum Line {
     PostProcess { status: String, name: String },
     Meta(Box<Value>),
     File(String),
+    Thumb(String),
     Subs(Box<Value>),
     Error(String),
     Other,
@@ -561,6 +598,14 @@ pub fn parse_line(line: &str) -> Line {
     }
     if let Some(rest) = line.strip_prefix(FILE_PREFIX) {
         return Line::File(rest.trim().to_owned());
+    }
+    if let Some(rest) = line.strip_prefix(THUMB_PREFIX) {
+        let t = rest.trim();
+        return if t.is_empty() || t == "NA" {
+            Line::Other
+        } else {
+            Line::Thumb(t.to_owned())
+        };
     }
     if let Some(rest) = line.strip_prefix(SUBS_PREFIX) {
         return serde_json::from_str(rest)
@@ -924,6 +969,19 @@ mod tests {
             validate_custom_args("-fbestaudio").is_ok(),
             "value after -f"
         );
+        assert_eq!(
+            command_running_option("-N 4 --exe 'x'").as_deref(),
+            Some("--exec")
+        );
+        assert_eq!(
+            command_running_option("--external-downloader aria2c").as_deref(),
+            Some("--external-downloader")
+        );
+        assert_eq!(
+            command_running_option("--plugin-d /x").as_deref(),
+            Some("--plugin-dirs")
+        );
+        assert_eq!(command_running_option("-N 4 --embed-subs"), None);
         let v = validation_args(&["-N".into(), "4".into()]);
         assert_eq!(v.last().unwrap(), VALIDATION_URL);
         assert_eq!(

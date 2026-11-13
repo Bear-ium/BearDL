@@ -248,7 +248,9 @@ fn immediate_resume_after_pause_completes() {
         },
         Arc::new(|_| {}),
     );
-    wait("yt-dlp install", 180, || engine.state().paths.ytdlp.is_some());
+    wait("yt-dlp install", 180, || {
+        engine.state().paths.ytdlp.is_some()
+    });
     engine.send(Cmd::Enqueue(vec![NewItem {
         url: DIRECT.into(),
         title: "race".into(),

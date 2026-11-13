@@ -6,10 +6,20 @@ use crate::thumbs::{ThumbCache, small_path};
 use crate::util::{format_bytes, format_duration, format_timestamp, format_upload_date};
 use eframe::egui;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const PAGE: usize = 100;
 const ROW_H: f32 = 44.0;
+/// Search runs this long after the last keystroke.
+const SEARCH_DELAY: f64 = 0.25;
+
+/// The selected entry with what the quick view needs, worked out once on selection.
+struct Detail {
+    d: Arc<Download>,
+    exists: bool,
+    chapters: Vec<crate::ytdlp::Chapter>,
+}
 
 #[derive(Default)]
 pub struct LibraryUi {
@@ -23,11 +33,19 @@ pub struct LibraryUi {
     selected: Option<(usize, i64)>,
     scroll_to: Option<usize>,
     pub quick_view: bool,
-    detail: Option<Download>,
+    detail: Option<Detail>,
+    search_input: String,
+    search_edited: Option<f64>,
+    /// Row index to select after the next refresh (after a delete).
+    reselect: Option<usize>,
+    /// List thumbnail per stored path: the small copy if it exists, else the original.
+    thumb_paths: HashMap<String, PathBuf>,
     confirm_delete: Option<i64>,
     thumbs: Option<ThumbCache>,
     scanned: bool,
     scroll_offset: f32,
+    /// Development screenshots: select the first row once the list is loaded.
+    pub dev_select_first: bool,
 }
 
 impl LibraryUi {
@@ -46,23 +64,74 @@ impl LibraryUi {
         self.dirty = true;
     }
 
+    fn load_detail(&mut self, id: i64) -> Option<Detail> {
+        let d = self.db()?.get_download(id).ok().flatten()?;
+        Some(Detail {
+            exists: !d.file_path.is_empty() && Path::new(&d.file_path).is_file(),
+            chapters: crate::ytdlp::parse_chapters(&d.chapters_json),
+            d: Arc::new(d),
+        })
+    }
+
     fn refresh(&mut self) {
         if !self.dirty {
             return;
         }
         self.dirty = false;
         self.pages.clear();
+        self.thumb_paths.clear();
+        if let Some(t) = self.thumbs.as_mut() {
+            // Files may have been written or replaced since they were decoded.
+            t.clear();
+        }
         let q = self.query.clone();
         self.count = self
             .db()
             .and_then(|db| db.library_count(&q).ok())
             .unwrap_or(0);
-        if let Some((_, id)) = self.selected {
-            self.detail = self.db().and_then(|db| db.get_download(id).ok().flatten());
+        if let Some(i) = self.reselect.take() {
+            self.selected = None;
+            self.detail = None;
+            if self.count > 0 {
+                self.select(i.min(self.count - 1));
+            }
+            return;
+        }
+        if let Some((i, id)) = self.selected {
+            self.detail = self.load_detail(id);
             if self.detail.is_none() {
                 self.selected = None;
+                return;
+            }
+            // Rows may have shifted (a new download at the top): find the entry again
+            // near where it was.
+            let near = i.saturating_sub(PAGE)..(i + PAGE).min(self.count);
+            if let Some(j) = near
+                .into_iter()
+                .find(|&j| self.row(j).is_some_and(|r| r.id == id))
+            {
+                self.selected = Some((j, id));
             }
         }
+    }
+
+    fn list_thumb_path(&mut self, thumb: &str) -> Option<PathBuf> {
+        if thumb.is_empty() {
+            return None;
+        }
+        Some(
+            self.thumb_paths
+                .entry(thumb.to_owned())
+                .or_insert_with(|| {
+                    let small = small_path(Path::new(thumb));
+                    if small.is_file() {
+                        small
+                    } else {
+                        PathBuf::from(thumb)
+                    }
+                })
+                .clone(),
+        )
     }
 
     fn row(&mut self, i: usize) -> Option<&LibraryRow> {
@@ -87,7 +156,7 @@ impl LibraryUi {
             return;
         };
         self.selected = Some((i, id));
-        self.detail = self.db().and_then(|db| db.get_download(id).ok().flatten());
+        self.detail = self.load_detail(id);
     }
 }
 
@@ -96,6 +165,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let lib = &mut app.lib;
     if lib.thumbs.is_none() {
         lib.thumbs = Some(ThumbCache::new(ui.ctx().clone(), 400));
+        // Newest first by default.
+        lib.query.descending = true;
+    }
+    // Debounced search: apply the text once typing pauses.
+    if let Some(t) = lib.search_edited {
+        let now = ui.input(|i| i.time);
+        if now - t >= SEARCH_DELAY {
+            lib.search_edited = None;
+            if lib.query.text != lib.search_input {
+                lib.query.text = lib.search_input.clone();
+                lib.selected = None;
+                lib.detail = None;
+                lib.invalidate();
+            }
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(
+                    SEARCH_DELAY - (now - t),
+                ));
+        }
     }
     if lib.seen_rev != Some(rev) {
         lib.seen_rev = Some(rev);
@@ -112,9 +201,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         );
         return;
     }
+    // Read focus before the toolbar: Enter in the search box ends its focus this frame.
+    let typing = ui.ctx().memory(|m| m.focused().is_some());
     toolbar(app, ui);
     app.lib.refresh();
-    keyboard(app, ui);
+    if app.lib.dev_select_first && app.lib.count > 0 {
+        app.lib.dev_select_first = false;
+        app.lib.select(0);
+    }
+    if !typing {
+        keyboard(app, ui);
+    }
     if app.lib.quick_view && app.lib.detail.is_some() {
         egui::Panel::right("quick_view")
             .resizable(true)
@@ -130,11 +227,16 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let lib = &mut app.lib;
     let before = lib.query.clone();
     ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut lib.query.text)
-                .hint_text("Search title, channel, description")
-                .desired_width(260.0),
-        );
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut lib.search_input)
+                    .hint_text("Search title, channel, description")
+                    .desired_width(260.0),
+            )
+            .changed()
+        {
+            lib.search_edited = Some(ui.input(|i| i.time));
+        }
         egui::ComboBox::from_id_salt("lib_status")
             .selected_text(lib.query.status.map_or("Any status", |s| s.label()))
             .show_ui(ui, |ui| {
@@ -249,7 +351,7 @@ fn keyboard(app: &mut App, ui: &mut egui::Ui) {
     if del && let Some((_, id)) = lib.selected {
         lib.confirm_delete = Some(id);
     }
-    if enter && let Some(d) = lib.detail.clone() {
+    if enter && let Some(d) = lib.detail.as_ref().map(|d| d.d.clone()) {
         app.play(&d, None);
     }
 }
@@ -287,9 +389,8 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
             };
             let selected = lib.selected.is_some_and(|(_, id)| id == row.id);
             let thumb = lib
-                .thumbs
-                .as_mut()
-                .and_then(|t| list_thumb(t, &row.thumb_path));
+                .list_thumb_path(&row.thumb_path)
+                .and_then(|p| lib.thumbs.as_mut()?.get(&p, 96));
             let r = library_row(ui, &row, selected, thumb);
             if r.clicked() {
                 clicked = Some(i);
@@ -315,21 +416,9 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some(i) = double {
         lib.select(i);
-        if let Some(d) = lib.detail.clone() {
+        if let Some(d) = lib.detail.as_ref().map(|d| d.d.clone()) {
             app.play(&d, None);
         }
-    }
-}
-
-fn list_thumb(cache: &mut ThumbCache, thumb: &str) -> Option<egui::TextureHandle> {
-    if thumb.is_empty() {
-        return None;
-    }
-    let small = small_path(Path::new(thumb));
-    if small.is_file() {
-        cache.get(&small, 96)
-    } else {
-        cache.get(Path::new(thumb), 96)
     }
 }
 
@@ -433,7 +522,12 @@ fn library_row(
 }
 
 fn quick_view(app: &mut App, ui: &mut egui::Ui) {
-    let Some(d) = app.lib.detail.clone() else {
+    let Some((d, exists, chapters)) = app
+        .lib
+        .detail
+        .as_ref()
+        .map(|x| (x.d.clone(), x.exists, x.chapters.clone()))
+    else {
         return;
     };
     let mut cmds = Vec::new();
@@ -507,7 +601,6 @@ fn quick_view(app: &mut App, ui: &mut egui::Ui) {
                 });
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                let exists = !d.file_path.is_empty() && Path::new(&d.file_path).is_file();
                 if ui.add_enabled(exists, egui::Button::new("Play")).clicked() {
                     app.play(&d, None);
                 }
@@ -530,7 +623,6 @@ fn quick_view(app: &mut App, ui: &mut egui::Ui) {
                     app.lib.confirm_delete = Some(d.id);
                 }
             });
-            let chapters = crate::ytdlp::parse_chapters(&d.chapters_json);
             if !chapters.is_empty() {
                 ui.add_space(8.0);
                 ui.strong("Chapters");
@@ -564,8 +656,8 @@ fn delete_dialog(app: &mut App, ui: &mut egui::Ui) {
         .lib
         .detail
         .as_ref()
-        .filter(|d| d.id == id)
-        .map(|d| d.title.clone())
+        .filter(|d| d.d.id == id)
+        .map(|d| d.d.title.clone())
         .unwrap_or_default();
     let mut close = false;
     egui::Window::new("Delete")
@@ -596,9 +688,11 @@ fn delete_dialog(app: &mut App, ui: &mut egui::Ui) {
         });
     if close {
         app.lib.confirm_delete = None;
-        if app.lib.selected.is_some_and(|(_, s)| s == id) {
-            app.lib.selected = None;
-            app.lib.detail = None;
+        if let Some((i, s)) = app.lib.selected
+            && s == id
+        {
+            // Keep the keyboard position: select whatever moves into this row.
+            app.lib.reselect = Some(i);
         }
     }
 }

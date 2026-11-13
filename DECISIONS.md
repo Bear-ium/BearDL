@@ -35,3 +35,24 @@
   - The analysis spinner animates while yt-dlp runs. It only lasts a few seconds.
   - Downloads without a known total show bytes instead of an animated bar, so a live stream doesn't repaint continuously.
 - **M2 is measured before its review fixes.** M3 re-measures.
+- **Import safety (from a security review).** An export file is untrusted input, so import:
+  - never changes the yt-dlp, ffmpeg or mpv paths, in either mode;
+  - strips custom arguments from imported presets that run programs or load code, matched with prefix expansion (`--exec`, `--exec-before-download`, `--netrc-cmd`, `--plugin-dirs`, `--use-postprocessor`, `--downloader`/`--external-downloader`, `--ffmpeg-location`, `--config-location(s)`), and from presets whose arguments are otherwise invalid;
+  - in merge mode, never overwrites a different local preset of the same name; the imported one is renamed "(imported)";
+  - writes theme files only inside the themes folder, under sanitised names.
+
+  The user can still put those options into their own presets by hand.
+- **Library sort indexes are partial (`WHERE status != 'queued'`)**, matching the library filter. This took deep pages from about 65 ms to a few ms at 100,000 rows. Schema changes are versioned with `PRAGMA user_version`.
+- **SQLite page cache is 16 MiB.** With the default 2 MiB, bulk inserts thrashed: 100k rows took 23 s, now 4.6 s. The cache only grows when it is used.
+- **100,000-entry library, release build:**
+  - count: 3 ms
+  - search count: 12 ms
+  - first page: 0.1 ms
+  - page at row 99,900 sorted by title: 4 ms
+  
+  The list is virtualised, so only visible pages of 100 rows are loaded.
+- **Library search is debounced by 250 ms**, so a fast typist does not run a query per keystroke.
+- **Moved-file detection** looks for a file with the same name **and size** under the download folder (4 levels, 200k files max, no symlinks or junctions). It only re-links when no other entry already uses that file. Anything else is flagged as missing.
+- **Delete with file** removes a file only if the entry is Done and no remaining entry points at it, since re-downloads can share a path. It removes thumbnails only from the app's cache folder.
+- **Thumbnails.** Small list copies (192 px) are made by ffmpeg after download and written atomically. Decoding happens on one worker thread, newest request first, using JPEG DCT scaling. The texture cache allows 400 small and 6 large (quick view) textures. With `panic = "abort"` a decoder panic cannot be caught, but jpeg-decoder reports malformed input as errors.
+- **Quick view and list rows** resolve file existence, chapters and thumbnail paths once per refresh, not per frame.

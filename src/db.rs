@@ -35,12 +35,8 @@ CREATE TABLE IF NOT EXISTS downloads (
     created_at INTEGER NOT NULL,
     finished_at INTEGER
 );
-CREATE INDEX IF NOT EXISTS downloads_created ON downloads(created_at);
 CREATE INDEX IF NOT EXISTS downloads_status ON downloads(status, created_at);
-CREATE INDEX IF NOT EXISTS downloads_title ON downloads(title COLLATE NOCASE);
-CREATE INDEX IF NOT EXISTS downloads_channel ON downloads(channel COLLATE NOCASE);
-CREATE INDEX IF NOT EXISTS downloads_size ON downloads(file_size);
-CREATE INDEX IF NOT EXISTS downloads_duration ON downloads(duration);
+CREATE INDEX IF NOT EXISTS downloads_file ON downloads(file_path) WHERE file_path != '';
 CREATE INDEX IF NOT EXISTS downloads_queue ON downloads(in_queue, queue_pos);
 CREATE INDEX IF NOT EXISTS downloads_video ON downloads(video_id);
 
@@ -272,7 +268,12 @@ pub struct LibraryQuery {
 pub fn fts_query(text: &str) -> Option<String> {
     let terms: Vec<String> = text
         .split_whitespace()
-        .map(|w| w.replace('"', ""))
+        // Quotes would end the FTS5 string; control characters (NUL) break the query.
+        .map(|w| {
+            w.chars()
+                .filter(|c| *c != '"' && !c.is_control())
+                .collect::<String>()
+        })
         .filter(|w| !w.is_empty())
         .map(|w| format!("\"{w}\"*"))
         .collect();
@@ -302,6 +303,39 @@ pub struct SubLog {
     pub message: String,
 }
 
+/// Library sort indexes are partial on `status != 'queued'`, matching the library filter, so a
+/// page deep into a sorted library walks only library rows.
+const LIBRARY_INDEXES: &str = r#"
+DROP INDEX IF EXISTS downloads_created;
+DROP INDEX IF EXISTS downloads_title;
+DROP INDEX IF EXISTS downloads_channel;
+DROP INDEX IF EXISTS downloads_size;
+DROP INDEX IF EXISTS downloads_duration;
+CREATE INDEX IF NOT EXISTS lib_created ON downloads(created_at) WHERE status != 'queued';
+CREATE INDEX IF NOT EXISTS lib_title ON downloads(title COLLATE NOCASE) WHERE status != 'queued';
+CREATE INDEX IF NOT EXISTS lib_channel ON downloads(channel COLLATE NOCASE) WHERE status != 'queued';
+CREATE INDEX IF NOT EXISTS lib_size ON downloads(file_size) WHERE status != 'queued';
+CREATE INDEX IF NOT EXISTS lib_duration ON downloads(duration) WHERE status != 'queued';
+CREATE INDEX IF NOT EXISTS lib_missing ON downloads(created_at) WHERE missing = 1;
+"#;
+
+const SCHEMA_VERSION: i64 = 2;
+
+fn migrate(conn: &Connection) -> Result<()> {
+    let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if v < 2 {
+        conn.execute_batch(LIBRARY_INDEXES)?;
+        conn.execute_batch("ANALYZE")?;
+    }
+    if v != SCHEMA_VERSION {
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+    }
+    Ok(())
+}
+
+/// `(id, file_path, missing, file_size)`.
+pub type FileRow = (i64, String, bool, Option<i64>);
+
 pub struct Db {
     pub conn: Connection,
 }
@@ -322,9 +356,10 @@ impl Db {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; \
-             PRAGMA temp_store=MEMORY;",
+             PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16000;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -553,6 +588,22 @@ impl Db {
         Ok(())
     }
 
+    /// How many rows other than `except` point at `path`. Files shared by several rows
+    /// (re-downloads, re-linked files) are never deleted while still referenced.
+    pub fn file_refs(&self, path: &str, except: &[i64]) -> Result<usize> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT id FROM downloads WHERE file_path = ?1 OR thumb_path = ?1")?;
+        let ids = st.query_map([path], |r| r.get::<_, i64>(0))?;
+        let mut n = 0;
+        for id in ids {
+            if !except.contains(&id?) {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     pub fn set_missing(&mut self, flags: &[(i64, bool)]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -565,12 +616,14 @@ impl Db {
         Ok(())
     }
 
-    /// `(id, file_path, missing)` for every finished entry, for the moved/deleted file scan.
-    pub fn files(&self) -> Result<Vec<(i64, String, bool)>> {
+    /// `(id, file_path, missing, file_size)` for every finished entry, for the
+    /// moved/deleted file scan.
+    pub fn files(&self) -> Result<Vec<FileRow>> {
         let mut st = self.conn.prepare(
-            "SELECT id, file_path, missing FROM downloads WHERE status = 'done' AND file_path != ''",
+            "SELECT id, file_path, missing, file_size FROM downloads \
+             WHERE status = 'done' AND file_path != ''",
         )?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

@@ -7,8 +7,8 @@ Measurements on Windows 11, x86_64, release build. Cold start = launch to first 
 | M0 Scaffold | done | 2026-11-13 | 3.21 MiB | 233 ms | 70.6 MiB private | 0 ms / 10 s |
 | M1 Tool manager | done | 2026-11-13 | 3.75 MiB | 282 ms | 79.9 MiB private | 16 ms / 10 s |
 | M2 Download core | done | 2026-11-13 | 4.89 MiB | 276 ms | 80.7 MiB private | 0 ms / 10 s |
-| M3 Library and quick view | in progress | | | | | |
-| M4 Settings, themes, export | todo | | | | | |
+| M3 Library and quick view | done | 2026-11-13 | 5.15 MiB | 265 ms | 79.6 MiB private | 0 ms / 10 s |
+| M4 Settings, themes, export | in progress | | | | | |
 | M5 Player and metadata | todo | | | | | |
 | M6 Subtitle indexing | todo | | | | | |
 | M7 Subscriptions | todo | | | | | |

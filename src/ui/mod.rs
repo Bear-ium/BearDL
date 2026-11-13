@@ -118,6 +118,10 @@ impl App {
             if let Some(p) = s.page.as_deref().and_then(Page::from_name) {
                 self.page = p;
             }
+            if s.select_first {
+                self.lib.dev_select_first = true;
+                self.lib.quick_view = true;
+            }
             if let Some(u) = s.url.clone() {
                 self.engine.send(crate::engine::Cmd::Analyse(u));
             }

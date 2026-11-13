@@ -10,6 +10,7 @@ pub struct Shots {
     requested: bool,
     pub page: Option<String>,
     pub url: Option<String>,
+    pub select_first: bool,
 }
 
 impl Shots {
@@ -25,6 +26,7 @@ impl Shots {
             requested: false,
             page: std::env::var("BEARDL_SHOT_PAGE").ok(),
             url: std::env::var("BEARDL_SHOT_URL").ok(),
+            select_first: std::env::var("BEARDL_SHOT_SELECT").is_ok(),
         })
     }
 

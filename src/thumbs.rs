@@ -7,6 +7,9 @@ use std::sync::mpsc;
 
 /// Width of the cached list thumbnail.
 pub const SMALL_WIDTH: u32 = 192;
+/// Decodes at or above this width count as large (quick view) and have their own cap.
+const LARGE_FROM: u16 = 300;
+const LARGE_CAPACITY: usize = 6;
 
 pub fn small_path(thumb: &Path) -> PathBuf {
     let stem = thumb
@@ -16,21 +19,25 @@ pub fn small_path(thumb: &Path) -> PathBuf {
     thumb.with_file_name(format!("{stem}.small.jpg"))
 }
 
-/// Writes a small JPEG next to `src` with ffmpeg. Returns its path.
+/// Writes a small JPEG next to `src` with ffmpeg. It is written under a temporary name and
+/// renamed, so a reader never sees a half-written file. Returns its path.
 pub fn make_small(ffmpeg: &Path, src: &Path) -> crate::error::Result<PathBuf> {
     let dst = small_path(src);
+    let tmp = dst.with_extension("tmp.jpg");
     let out = command(ffmpeg)
         .args(["-y", "-loglevel", "error", "-i"])
         .arg(src)
         .args(["-vf", &format!("scale={SMALL_WIDTH}:-2"), "-q:v", "5"])
-        .arg(&dst)
+        .arg(&tmp)
         .output()?;
-    if !out.status.success() || !dst.is_file() {
+    if !out.status.success() || !tmp.is_file() {
+        let _ = std::fs::remove_file(&tmp);
         crate::bail!(
             "ffmpeg could not scale the thumbnail: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
+    std::fs::rename(&tmp, &dst)?;
     Ok(dst)
 }
 
@@ -76,16 +83,45 @@ pub fn decode(path: &Path, max_w: u16, max_h: u16) -> Option<egui::ColorImage> {
 
 type Key = (PathBuf, u16);
 
-/// Loads and caches thumbnail textures. A worker thread decodes on request; the UI asks
-/// every frame and gets `None` until the texture is ready.
+/// Loads and caches thumbnail textures. A worker thread decodes on request, newest request
+/// first; the UI asks every frame and gets `None` until the texture is ready.
 pub struct ThumbCache {
     ctx: egui::Context,
     tx: Option<mpsc::Sender<Key>>,
     rx: Option<mpsc::Receiver<(Key, Option<egui::ColorImage>)>>,
     textures: HashMap<Key, Option<egui::TextureHandle>>,
-    order: VecDeque<Key>,
+    small_order: VecDeque<Key>,
+    large_order: VecDeque<Key>,
     pending: HashSet<Key>,
     capacity: usize,
+}
+
+fn worker_loop(
+    rx: mpsc::Receiver<Key>,
+    tx: mpsc::Sender<(Key, Option<egui::ColorImage>)>,
+    ctx: egui::Context,
+) {
+    let mut stack: Vec<Key> = Vec::new();
+    loop {
+        if stack.is_empty() {
+            // Blocks while idle: no CPU use.
+            match rx.recv() {
+                Ok(k) => stack.push(k),
+                Err(_) => return,
+            }
+        }
+        stack.extend(rx.try_iter());
+        let Some(key) = stack.pop() else { continue };
+        let (path, w) = (key.0.clone(), key.1);
+        // A corrupt file must not take the worker down.
+        let img = std::panic::catch_unwind(|| decode(&path, w, w))
+            .ok()
+            .flatten();
+        if tx.send((key, img)).is_err() {
+            return;
+        }
+        ctx.request_repaint();
+    }
 }
 
 impl ThumbCache {
@@ -95,34 +131,34 @@ impl ThumbCache {
             tx: None,
             rx: None,
             textures: HashMap::new(),
-            order: VecDeque::new(),
+            small_order: VecDeque::new(),
+            large_order: VecDeque::new(),
             pending: HashSet::new(),
             capacity,
         }
     }
 
-    fn worker(&mut self) -> &mpsc::Sender<Key> {
-        if self.tx.is_none() {
-            let (tx, rx) = mpsc::channel::<Key>();
-            let (dtx, drx) = mpsc::channel();
-            let ctx = self.ctx.clone();
-            let _ = std::thread::Builder::new()
-                .name("thumbs".into())
-                .spawn(move || {
-                    // Blocks on recv while idle: no CPU use.
-                    while let Ok(key) = rx.recv() {
-                        let (path, w) = &key;
-                        let img = decode(path, *w, *w);
-                        if dtx.send((key, img)).is_err() {
-                            break;
-                        }
-                        ctx.request_repaint();
-                    }
-                });
+    fn send(&mut self, key: Key) {
+        if let Some(tx) = &self.tx
+            && tx.send(key.clone()).is_ok()
+        {
+            return;
+        }
+        // No worker yet, or it stopped: start one.
+        let (tx, rx) = mpsc::channel::<Key>();
+        let (dtx, drx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        let started = std::thread::Builder::new()
+            .name("thumbs".into())
+            .spawn(move || worker_loop(rx, dtx, ctx))
+            .is_ok();
+        if started {
+            let _ = tx.send(key);
             self.tx = Some(tx);
             self.rx = Some(drx);
+        } else {
+            self.pending.remove(&key);
         }
-        self.tx.as_ref().expect("worker started")
     }
 
     fn receive(&mut self) {
@@ -135,9 +171,14 @@ impl ThumbCache {
                     .load_texture(key.0.to_string_lossy(), i, egui::TextureOptions::LINEAR)
             });
             self.textures.insert(key.clone(), tex);
-            self.order.push_back(key);
-            while self.order.len() > self.capacity {
-                if let Some(old) = self.order.pop_front() {
+            let (order, cap) = if key.1 >= LARGE_FROM {
+                (&mut self.large_order, LARGE_CAPACITY)
+            } else {
+                (&mut self.small_order, self.capacity)
+            };
+            order.push_back(key);
+            while order.len() > cap {
+                if let Some(old) = order.pop_front() {
                     self.textures.remove(&old);
                 }
             }
@@ -155,15 +196,16 @@ impl ThumbCache {
             return t.clone();
         }
         if self.pending.insert(key.clone()) {
-            let _ = self.worker().send(key);
+            self.send(key);
         }
         None
     }
 
-    /// Drops cached textures (after a delete or re-download).
-    pub fn forget(&mut self, path: &Path) {
-        self.textures.retain(|k, _| k.0 != path);
-        self.order.retain(|k| k.0 != path);
+    /// Drops every cached texture, so changed or newly written files are read again.
+    pub fn clear(&mut self) {
+        self.textures.clear();
+        self.small_order.clear();
+        self.large_order.clear();
     }
 }
 
@@ -182,5 +224,13 @@ mod tests {
     #[test]
     fn decode_missing_is_none() {
         assert!(decode(Path::new("/no/such.jpg"), 100, 100).is_none());
+    }
+
+    #[test]
+    fn decode_garbage_is_none() {
+        let p = std::env::temp_dir().join(format!("beardl-bad-{}.jpg", std::process::id()));
+        std::fs::write(&p, b"\xff\xd8\xff\xe0 not really a jpeg").unwrap();
+        assert!(decode(&p, 100, 100).is_none());
+        std::fs::remove_file(p).unwrap();
     }
 }

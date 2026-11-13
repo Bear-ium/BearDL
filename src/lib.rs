@@ -4,10 +4,12 @@
 pub mod db;
 pub mod engine;
 pub mod error;
+pub mod export;
 pub mod net;
 pub mod paths;
 pub mod settings;
 pub mod startup;
+pub mod theme;
 pub mod thumbs;
 pub mod tools;
 pub mod ui;
