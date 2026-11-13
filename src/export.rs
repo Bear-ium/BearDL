@@ -131,15 +131,24 @@ pub fn build(db: &Db, settings: &Settings, themes_dir: &Path) -> Result<Bundle> 
     })
 }
 
+/// Writes atomically, so a failed export never leaves a half-written file.
 pub fn write(path: &Path, bundle: &Bundle) -> Result<()> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
-    std::fs::write(path, serde_json::to_vec_pretty(bundle)?)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(bundle)?)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
+/// Exports are small; anything much larger is not one of ours.
+const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
+
 pub fn read(path: &Path) -> Result<Bundle> {
+    if std::fs::metadata(path)?.len() > MAX_IMPORT_BYTES {
+        crate::bail!("the file is too large to be a BearDL export");
+    }
     let bytes = std::fs::read(path)?;
     let b: Bundle = serde_json::from_slice(&bytes)
         .map_err(|e| crate::error::Error(format!("not a BearDL export: {e}")))?;
@@ -165,6 +174,99 @@ fn safe_theme_name(name: &str) -> Option<String> {
         .then_some(clean)
 }
 
+/// A folder or template that stays inside the download folder: relative, no `..`, no drive.
+pub fn is_safe_relative(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let p = Path::new(t);
+    !p.is_absolute()
+        && !p.has_root()
+        && !t.starts_with(['/', '\\'])
+        && !(t.len() >= 2 && t.as_bytes()[1] == b':')
+        && !t.split(['/', '\\']).any(|c| c.trim() == "..")
+}
+
+/// A preset name not used yet: "Name (imported)", then "Name (imported 2)", ...
+fn free_preset_name(tx: &rusqlite::Transaction, name: &str) -> Result<String> {
+    for i in 1..1000 {
+        let candidate = if i == 1 {
+            format!("{name} (imported)")
+        } else {
+            format!("{name} (imported {i})")
+        };
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM presets WHERE name = ?1)",
+            [&candidate],
+            |r| r.get(0),
+        )?;
+        if !taken {
+            return Ok(candidate);
+        }
+    }
+    crate::bail!("too many imported copies of preset {name}")
+}
+
+/// Clears `folder` and `output_template` strings inside an imported JSON value that would
+/// write outside the download folder. Returns what was removed.
+fn sanitise_paths(v: &mut serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                if matches!(k.as_str(), "folder" | "output_template") {
+                    let bad = val.as_str().is_none_or(|s| !is_safe_relative(s));
+                    if bad {
+                        out.push(k.clone());
+                        *val = serde_json::Value::String(String::new());
+                    }
+                } else {
+                    out.extend(sanitise_paths(val));
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                out.extend(sanitise_paths(item));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Clears any `custom_args` string inside an imported JSON value that fails the import
+/// allowlist. Returns the reasons.
+fn sanitise_custom_args(v: &mut serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                if k == "custom_args" {
+                    let bad = match val.as_str() {
+                        Some(a) => crate::ytdlp::check_imported_args(a).err(),
+                        None => Some("not text".into()),
+                    };
+                    if let Some(e) = bad {
+                        out.push(e);
+                        *val = serde_json::Value::String(String::new());
+                    }
+                } else {
+                    out.extend(sanitise_custom_args(val));
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                out.extend(sanitise_custom_args(item));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Applies a bundle. Returns the settings the app should adopt (if any) and a summary.
 pub fn apply(
     db: &mut Db,
@@ -181,10 +283,9 @@ pub fn apply(
         s.ytdlp_path = current.ytdlp_path.clone();
         s.ffmpeg_path = current.ffmpeg_path.clone();
         s.mpv_path = current.mpv_path.clone();
-        if mode == ImportMode::Merge {
-            // Folders from another machine rarely exist here.
-            s.download_dir = current.download_dir.clone();
-        }
+        // Where files are written is not taken from a file either.
+        s.download_dir = current.download_dir.clone();
+        s.output_template = current.output_template.clone();
         sum.settings = Some(s.sanitised());
     }
 
@@ -198,17 +299,21 @@ pub fn apply(
             continue;
         }
         let mut options = p.options.clone();
-        // Imported presets may not run programs: their custom arguments are dropped if they
-        // contain such options or are otherwise not allowed.
-        if let Some(opt) = crate::ytdlp::command_running_option(&options.custom_args) {
-            sum.warnings.push(format!(
-                "Preset “{name}” used {opt}, which runs programs; its custom arguments were removed."
-            ));
-            options.custom_args.clear();
-        } else if crate::ytdlp::validate_custom_args(&options.custom_args).is_err() {
-            sum.warnings.push(format!(
-                "Preset “{name}” had custom arguments BearDL does not allow; they were removed."
-            ));
+        for (what, value) in [
+            ("folder", &mut options.folder),
+            ("file name template", &mut options.output_template),
+        ] {
+            if !is_safe_relative(value) {
+                sum.warnings.push(format!(
+                    "Preset “{name}”: {what} removed (must stay inside the download folder)."
+                ));
+                value.clear();
+            }
+        }
+        // Imported presets keep custom arguments only if every option is on the allowlist.
+        if let Err(e) = crate::ytdlp::check_imported_args(&options.custom_args) {
+            sum.warnings
+                .push(format!("Preset “{name}”: custom arguments removed ({e})."));
             options.custom_args.clear();
         }
         let json = serde_json::to_string(&options)?;
@@ -222,7 +327,7 @@ pub fn apply(
                 )
                 .ok();
             if existing.is_some_and(|e| e != json) {
-                name = format!("{name} (imported)");
+                name = free_preset_name(&tx, &name)?;
             }
         }
         tx.execute(
@@ -239,7 +344,20 @@ pub fn apply(
         if s.url.trim().is_empty() {
             continue;
         }
-        let cfg = s.config.to_string();
+        let mut config = s.config.clone();
+        for w in sanitise_paths(&mut config) {
+            sum.warnings.push(format!(
+                "Subscription “{}”: {w} removed (must stay inside the download folder).",
+                s.name
+            ));
+        }
+        for w in sanitise_custom_args(&mut config) {
+            sum.warnings.push(format!(
+                "Subscription “{}”: custom arguments removed ({w}).",
+                s.name
+            ));
+        }
+        let cfg = config.to_string();
         let updated = tx.execute(
             "UPDATE subscriptions SET name = ?2, config_json = ?3, paused = ?4 WHERE url = ?1",
             params![s.url, s.name, cfg, s.paused],
@@ -293,13 +411,49 @@ pub fn apply(
             ));
             continue;
         };
-        if let Err(e) = crate::theme::Theme::parse(&t.content) {
-            sum.warnings
-                .push(format!("Skipped invalid theme {name}: {e}"));
-            continue;
+        let mut theme = match crate::theme::Theme::parse(&t.content) {
+            Ok(th) => th,
+            Err(e) => {
+                sum.warnings
+                    .push(format!("Skipped invalid theme {name}: {e}"));
+                continue;
+            }
+        };
+        // A font path from another machine could point anywhere; drop it.
+        let mut content = t.content.clone();
+        if theme.fonts.family.take().is_some() {
+            sum.warnings.push(format!(
+                "Theme {name}: custom font removed (set it again in the theme file)."
+            ));
+            content = toml::to_string_pretty(&theme).unwrap_or_default();
         }
-        std::fs::write(themes_dir.join(name), &t.content)?;
-        sum.themes += 1;
+        let mut target = themes_dir.join(&name);
+        if mode == ImportMode::Merge
+            && target.is_file()
+            && std::fs::read_to_string(&target).ok().as_deref() != Some(content.as_str())
+        {
+            // Keep the local file; store the imported one beside it.
+            let stem = name.trim_end_matches(".toml");
+            target = (1..)
+                .map(|i| {
+                    themes_dir.join(format!(
+                        "{stem}-imported{}.toml",
+                        if i == 1 {
+                            String::new()
+                        } else {
+                            format!("-{i}")
+                        }
+                    ))
+                })
+                .find(|p| !p.exists())
+                .unwrap_or(target);
+        }
+        match std::fs::write(&target, content) {
+            Ok(()) => sum.themes += 1,
+            Err(e) => sum
+                .warnings
+                .push(format!("Could not write theme {name}: {e}")),
+        }
     }
     Ok(sum)
 }
@@ -424,6 +578,16 @@ mod tests {
         );
         assert_eq!(safe_theme_name("ok.toml").as_deref(), Some("ok.toml"));
         assert!(safe_theme_name("run.exe").is_none());
+        assert!(is_safe_relative("music/%(uploader)s"));
+        assert!(is_safe_relative(""));
+        assert!(!is_safe_relative("../up"));
+        assert!(!is_safe_relative("a/../../b"));
+        assert!(!is_safe_relative("/etc"));
+        assert!(!is_safe_relative("C:\\Users\\x"));
+        assert!(!is_safe_relative("\\\\host\\share"));
+        let mut cfg = serde_json::json!({"folder": "../x", "inner": {"output_template": "C:/t.%(ext)s"}, "ok": {"folder": "subs"}});
+        assert_eq!(sanitise_paths(&mut cfg).len(), 2);
+        assert_eq!(cfg["ok"]["folder"], "subs");
         let bundle = Bundle {
             format: FORMAT.into(),
             version: 1,
@@ -459,6 +623,15 @@ mod tests {
         )
         .unwrap();
         assert!(sum.warnings.iter().any(|w| w.contains("--exec")));
+        let mut cfg = serde_json::json!({
+            "max_items": 3,
+            "options": {"custom_args": "--alias x --exec"},
+            "list": [{"custom_args": "-N 4"}]
+        });
+        let warnings = sanitise_custom_args(&mut cfg);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(cfg["options"]["custom_args"], "");
+        assert_eq!(cfg["list"][0]["custom_args"], "-N 4");
         let stored = db.presets().unwrap();
         let opts: DownloadOptions = serde_json::from_str(&stored[0].2).unwrap();
         assert!(opts.custom_args.is_empty(), "--exec stripped on import");

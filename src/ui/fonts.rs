@@ -54,6 +54,24 @@ const FALLBACK: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ];
 
+const MAX_FONT_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Reads a user font only if it is a local file of sane size that parses as a font, so a
+/// bad theme can never crash the font system (epaint panics on unparseable fonts).
+pub fn load_custom_font(path: &std::path::Path) -> Option<Vec<u8>> {
+    let s = path.to_string_lossy();
+    if s.starts_with("\\\\") || s.starts_with("//") {
+        return None;
+    }
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_FONT_BYTES {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    skrifa::FontRef::from_index(&data, 0).ok()?;
+    Some(data)
+}
+
 fn load_first(paths: &[&str]) -> Option<Vec<u8>> {
     paths.iter().find_map(|p| std::fs::read(p).ok())
 }
@@ -69,7 +87,7 @@ pub fn system_fonts(custom: Option<&std::path::Path>) -> FontDefinitions {
     };
     let mut prop = Vec::new();
     let mut mono = Vec::new();
-    if let Some(data) = custom.and_then(|p| std::fs::read(p).ok()) {
+    if let Some(data) = custom.and_then(load_custom_font) {
         prop.push(add("custom", data));
     }
     if let Some(data) = load_first(PROPORTIONAL) {

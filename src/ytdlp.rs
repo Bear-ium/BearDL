@@ -292,35 +292,101 @@ pub fn validate_custom_args(s: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
-/// Options that make yt-dlp run other programs or load code. Allowed in presets the user
-/// writes, but stripped from presets that come from an imported file.
-const RUNS_CODE: &[&str] = &[
-    "--exec",
-    "--exec-before-download",
-    "--netrc-cmd",
-    "--plugin-dirs",
-    "--use-postprocessor",
-    "--downloader",
-    "--external-downloader",
-    "--ffmpeg-location",
-    "--config-location",
-    "--config-locations",
+/// Options an imported preset may use. Imports are untrusted, so this is an allowlist:
+/// anything else (including `--alias`, which can expand to other options, and anything that
+/// runs programs, loads code or writes outside the download folder) is refused.
+const IMPORT_ALLOWED: &[&str] = &[
+    "-N",
+    "--concurrent-fragments",
+    "-r",
+    "--limit-rate",
+    "--throttled-rate",
+    "-R",
+    "--retries",
+    "--fragment-retries",
+    "--file-access-retries",
+    "--retry-sleep",
+    "--sleep-requests",
+    "--sleep-interval",
+    "--min-sleep-interval",
+    "--max-sleep-interval",
+    "--sleep-subtitles",
+    "--http-chunk-size",
+    "--force-ipv4",
+    "--force-ipv6",
+    "--geo-bypass",
+    "--xff",
+    "--impersonate",
+    "--extractor-args",
+    "--extractor-retries",
+    "-S",
+    "--format-sort",
+    "--format-sort-force",
+    "--prefer-free-formats",
+    "--check-formats",
+    "--merge-output-format",
+    "--remux-video",
+    "--recode-video",
+    "--audio-quality",
+    "--convert-subs",
+    "--sub-format",
+    "--embed-subs",
+    "--embed-thumbnail",
+    "--embed-metadata",
+    "--embed-chapters",
+    "--embed-info-json",
+    "--no-embed-subs",
+    "--no-embed-thumbnail",
+    "--no-embed-metadata",
+    "--no-embed-chapters",
+    "--split-chapters",
+    "--remove-chapters",
+    "--sponsorblock-mark",
+    "--sponsorblock-remove",
+    "--sponsorblock-chapter-title",
+    "--no-sponsorblock",
+    "--match-filters",
+    "--break-match-filters",
+    "--download-sections",
+    "--live-from-start",
+    "--no-live-from-start",
+    "--wait-for-video",
+    "--playlist-items",
+    "--playlist-reverse",
+    "--max-filesize",
+    "--min-filesize",
+    "--no-part",
+    "--no-mtime",
+    "--write-description",
+    "--write-info-json",
+    "--xattrs",
+    "--trim-filenames",
+    "--restrict-filenames",
+    "--windows-filenames",
+    "--force-keyframes-at-cuts",
 ];
 
-/// The first option in `args` that runs a program or loads code, if any. Unique prefixes
-/// count, as yt-dlp accepts them. Unparseable input counts as unsafe.
-pub fn command_running_option(args: &str) -> Option<String> {
-    let Some(list) = split_args(args) else {
-        return Some("unparseable arguments".into());
-    };
-    list.iter().find_map(|a| {
-        let long = a.strip_prefix("--")?;
-        let name = format!("--{}", long.split('=').next().unwrap_or(long));
-        RUNS_CODE
-            .iter()
-            .find(|r| name.len() > 3 && r.starts_with(name.as_str()))
-            .map(|r| (*r).to_owned())
-    })
+/// Checks custom arguments that came from an imported file. Every option must be spelled in
+/// full and be on the allowlist; values that follow are not interpreted as options.
+pub fn check_imported_args(s: &str) -> Result<(), String> {
+    validate_custom_args(s)?;
+    let args = split_args(s).ok_or("unterminated quote")?;
+    for a in &args {
+        if !a.starts_with('-') || a.len() < 2 {
+            continue;
+        }
+        let name = a.split('=').next().unwrap_or(a);
+        // Short options with an attached value (-N4) are reduced to the option itself.
+        let name = if !name.starts_with("--") && name.len() > 2 {
+            &name[..2]
+        } else {
+            name
+        };
+        if !IMPORT_ALLOWED.contains(&name) {
+            return Err(format!("{name} is not allowed in imported presets"));
+        }
+    }
+    Ok(())
 }
 
 /// URL that yt-dlp rejects without touching the network.
@@ -969,19 +1035,20 @@ mod tests {
             validate_custom_args("-fbestaudio").is_ok(),
             "value after -f"
         );
-        assert_eq!(
-            command_running_option("-N 4 --exe 'x'").as_deref(),
-            Some("--exec")
+        assert!(check_imported_args("-N 4 --sponsorblock-remove all --embed-subs").is_ok());
+        assert!(check_imported_args("-N4").is_ok());
+        assert!(check_imported_args("--exec 'x'").is_err());
+        assert!(
+            check_imported_args("--exe 'x'").is_err(),
+            "prefixes are refused"
         );
-        assert_eq!(
-            command_running_option("--external-downloader aria2c").as_deref(),
-            Some("--external-downloader")
-        );
-        assert_eq!(
-            command_running_option("--plugin-d /x").as_deref(),
-            Some("--plugin-dirs")
-        );
-        assert_eq!(command_running_option("-N 4 --embed-subs"), None);
+        assert!(check_imported_args("--alias foo --exec").is_err());
+        assert!(check_imported_args("--external-downloader aria2c").is_err());
+        assert!(check_imported_args("--plugin-dirs /x").is_err());
+        assert!(check_imported_args("--postprocessor-args 'x'").is_err());
+        assert!(check_imported_args("-P /etc").is_err());
+        assert!(check_imported_args("--print x").is_err(), "reserved too");
+        assert!(check_imported_args("").is_ok());
         let v = validation_args(&["-N".into(), "4".into()]);
         assert_eq!(v.last().unwrap(), VALIDATION_URL);
         assert_eq!(

@@ -463,7 +463,11 @@ fn library_row(
     } else {
         v.text_color()
     };
-    let weak = v.weak_text_color();
+    let weak = if selected {
+        v.selection.stroke.color.gamma_multiply(0.85)
+    } else {
+        v.weak_text_color()
+    };
     let x = thumb_rect.right() + 10.0;
     let right_w = 260.0;
     let title_w = (rect.right() - right_w - x).max(80.0);

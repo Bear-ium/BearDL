@@ -117,6 +117,9 @@ pub struct Theme {
 /// Parses `#rgb`, `#rrggbb` or `#rrggbbaa`.
 pub fn parse_colour(s: &str) -> Option<Color32> {
     let h = s.trim().strip_prefix('#')?;
+    if !h.is_ascii() {
+        return None;
+    }
     let v = |i: usize, n: usize| u8::from_str_radix(&h[i..i + n], 16).ok();
     match h.len() {
         3 => {
@@ -139,6 +142,23 @@ impl Theme {
         let t: Theme = toml::from_str(text).map_err(|e| e.message().to_owned())?;
         if t.name.trim().is_empty() {
             return Err("a theme needs a name".into());
+        }
+        let f = &t.fonts;
+        let s = &t.spacing;
+        for (k, v) in [
+            ("fonts.size", f.size),
+            ("fonts.heading", f.heading),
+            ("fonts.small", f.small),
+            ("fonts.monospace", f.monospace),
+            ("spacing.item_x", s.item_x),
+            ("spacing.item_y", s.item_y),
+            ("spacing.button_x", s.button_x),
+            ("spacing.button_y", s.button_y),
+            ("spacing.rounding", s.rounding),
+        ] {
+            if v.is_some_and(|v| !v.is_finite()) {
+                return Err(format!("{k} must be a number"));
+            }
         }
         let c = &t.colours;
         for (k, v) in [
@@ -327,11 +347,18 @@ pub fn load_user_themes(dir: &Path) -> Vec<UserTheme> {
     out
 }
 
-/// Writes an example theme the first time the folder is empty, so people have a template.
+/// Writes an example theme once, so people have a template. A marker file records that it
+/// was written, so deleting it (or every theme) does not bring it back.
 pub fn write_example(dir: &Path) {
+    let marker = dir.join(".example-written");
+    if marker.exists() {
+        return;
+    }
     let has_any = std::fs::read_dir(dir)
         .map(|mut r| r.next().is_some())
         .unwrap_or(false);
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(&marker, "");
     if has_any {
         return;
     }
@@ -369,6 +396,8 @@ mod tests {
         assert!(parse_colour("#10203080").is_some());
         assert!(parse_colour("102030").is_none());
         assert!(parse_colour("#zzzzzz").is_none());
+        assert!(parse_colour("#éa").is_none(), "non-ASCII must not panic");
+        assert!(parse_colour("#ééé").is_none());
     }
 
     #[test]
@@ -399,6 +428,8 @@ mod tests {
         assert!(Theme::parse("name = \"Bad\"\n[colours]\ntext = \"red\"\n").is_err());
         assert!(Theme::parse("[colours]\n").is_err());
         assert!(Theme::parse("name = 3").is_err());
+        assert!(Theme::parse("name = \"N\"\n[fonts]\nsize = nan\n").is_err());
+        assert!(Theme::parse("name = \"N\"\n[spacing]\nitem_x = inf\n").is_err());
     }
 
     #[test]

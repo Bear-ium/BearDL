@@ -35,13 +35,13 @@
   - The analysis spinner animates while yt-dlp runs. It only lasts a few seconds.
   - Downloads without a known total show bytes instead of an animated bar, so a live stream doesn't repaint continuously.
 - **M2 is measured before its review fixes.** M3 re-measures.
-- **Import safety (from a security review).** An export file is untrusted input, so import:
+- **Import safety (from two security reviews).** An export file is untrusted input, so import:
   - never changes the yt-dlp, ffmpeg or mpv paths, in either mode;
-  - strips custom arguments from imported presets that run programs or load code, matched with prefix expansion (`--exec`, `--exec-before-download`, `--netrc-cmd`, `--plugin-dirs`, `--use-postprocessor`, `--downloader`/`--external-downloader`, `--ffmpeg-location`, `--config-location(s)`), and from presets whose arguments are otherwise invalid;
+  - lets imported presets and subscription configs keep custom arguments only if every option is on a fixed allowlist of known-safe yt-dlp options, spelled in full; anything else clears that preset's custom arguments, with a warning. A denylist was tried first and replaced, because `--alias` and option prefixes can get around one;
   - in merge mode, never overwrites a different local preset of the same name; the imported one is renamed "(imported)";
   - writes theme files only inside the themes folder, under sanitised names.
 
-  The user can still put those options into their own presets by hand.
+  Presets the user writes by hand are still free to use any option, apart from the ones the app reserves.
 - **Library sort indexes are partial (`WHERE status != 'queued'`)**, matching the library filter. This took deep pages from about 65 ms to a few ms at 100,000 rows. Schema changes are versioned with `PRAGMA user_version`.
 - **SQLite page cache is 16 MiB.** With the default 2 MiB, bulk inserts thrashed: 100k rows took 23 s, now 4.6 s. The cache only grows when it is used.
 - **100,000-entry library, release build:**
@@ -56,3 +56,13 @@
 - **Delete with file** removes a file only if the entry is Done and no remaining entry points at it, since re-downloads can share a path. It removes thumbnails only from the app's cache folder.
 - **Thumbnails.** Small list copies (192 px) are made by ffmpeg after download and written atomically. Decoding happens on one worker thread, newest request first, using JPEG DCT scaling. The texture cache allows 400 small and 6 large (quick view) textures. With `panic = "abort"` a decoder panic cannot be caught, but jpeg-decoder reports malformed input as errors.
 - **Quick view and list rows** resolve file existence, chapters and thumbnail paths once per refresh, not per frame.
+- **Themes are TOML files** with optional `[colours]`, `[fonts]` and `[spacing]`, falling back to egui's light or dark base. A theme is applied only when the selection, a reload or an import changes it; `set_fonts` runs only when the font path changes. A theme font is used only if it is a local file under 50 MiB that parses as a font, because epaint panics on bad fonts. UNC paths are refused. Non-finite numbers and non-ASCII colours are rejected, not panicked on.
+- **The example theme** (`midnight.toml`) is written once, tracked by a marker file. Deleting it does not bring it back.
+- **Import never chooses where files go or what runs (M4 review).**
+  - Settings keep the local download folder, file-name template and tool paths.
+  - Preset and subscription folders and templates must be relative, with no `..`.
+  - Imported themes lose `fonts.family`.
+  - Merge never overwrites local presets or theme files; it adds "(imported)" or "-imported" copies.
+  - Files over 16 MiB are refused.
+  - Theme write errors become warnings, not a failed import.
+  - Export writes atomically. It does not ask before overwriting, since the user types the path.

@@ -10,9 +10,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         general(app, ui);
         ui.add_space(12.0);
+        appearance(app, ui);
+        ui.add_space(12.0);
         super::presets_view::show(app, ui);
         ui.add_space(12.0);
         tools(app, ui);
+        ui.add_space(12.0);
+        import_export(app, ui);
     });
 }
 
@@ -62,6 +66,128 @@ fn general(app: &mut App, ui: &mut egui::Ui) {
             );
             ui.end_row();
         });
+}
+
+fn appearance(app: &mut App, ui: &mut egui::Ui) {
+    ui.strong("Appearance");
+    let mut names: Vec<String> = crate::theme::builtins()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    for u in &app.user_themes {
+        if let Ok(t) = &u.theme
+            && !names.contains(&t.name)
+        {
+            names.push(t.name.clone());
+        }
+    }
+    egui::Grid::new("appearance")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Theme");
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("theme")
+                    .selected_text(app.settings.theme.clone())
+                    .show_ui(ui, |ui| {
+                        for n in &names {
+                            ui.selectable_value(&mut app.settings.theme, n.clone(), n);
+                        }
+                    });
+                if ui
+                    .button("Reload themes")
+                    .on_hover_text("Read the themes folder again after editing a file")
+                    .clicked()
+                {
+                    app.reload_themes();
+                }
+                if ui.button("Open themes folder").clicked() {
+                    let dir = crate::paths::themes_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = crate::util::open_path(&dir);
+                }
+            });
+            ui.end_row();
+            ui.label("Interface scale");
+            ui.add(
+                egui::Slider::new(&mut app.settings.ui_scale, 0.75..=2.0)
+                    .step_by(0.05)
+                    .fixed_decimals(2),
+            );
+            ui.end_row();
+        });
+    for u in &app.user_themes {
+        if let Err(e) = &u.theme {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!(
+                    "{}: {e}",
+                    u.path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+            );
+        }
+    }
+}
+
+fn import_export(app: &mut App, ui: &mut egui::Ui) {
+    use crate::export::ImportMode;
+    ui.strong("Import and export");
+    ui.weak("One file with settings, presets, subscriptions and your themes.");
+    ui.horizontal(|ui| {
+        ui.label("File");
+        ui.add(egui::TextEdit::singleline(&mut app.export_path).desired_width(380.0));
+    });
+    let path = std::path::PathBuf::from(app.export_path.trim().trim_matches('"'));
+    let has_path = !app.export_path.trim().is_empty();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(has_path, egui::Button::new("Export"))
+            .clicked()
+        {
+            app.engine.send(Cmd::Export {
+                path: path.clone(),
+                settings: Box::new(app.settings.clone()),
+            });
+        }
+        let exists = path.is_file();
+        if ui
+            .add_enabled(exists, egui::Button::new("Import and merge"))
+            .on_hover_text("Add and update presets, subscriptions and themes; keep your own")
+            .clicked()
+        {
+            app.engine.send(Cmd::Import {
+                path: path.clone(),
+                mode: ImportMode::Merge,
+                current: Box::new(app.settings.clone()),
+            });
+        }
+        if ui
+            .add_enabled(exists, egui::Button::new("Import and replace…"))
+            .on_hover_text("Make presets, subscriptions and themes match the file")
+            .clicked()
+        {
+            app.confirm_replace = true;
+        }
+    });
+    if app.confirm_replace {
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Replace removes presets, subscriptions and themes that are not in the file.",
+            );
+            if ui.button("Replace").clicked() {
+                app.engine.send(Cmd::Import {
+                    path: path.clone(),
+                    mode: ImportMode::Replace,
+                    current: Box::new(app.settings.clone()),
+                });
+                app.confirm_replace = false;
+            }
+            if ui.button("Cancel").clicked() {
+                app.confirm_replace = false;
+            }
+        });
+    }
 }
 
 fn tools(app: &mut App, ui: &mut egui::Ui) {

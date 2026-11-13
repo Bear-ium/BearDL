@@ -64,6 +64,13 @@ pub struct App {
     toasts: Vec<Toast>,
     bench_exit: bool,
     frames: u32,
+    pub(crate) user_themes: Vec<crate::theme::UserTheme>,
+    applied_theme: Option<String>,
+    applied_font: Option<Option<std::path::PathBuf>>,
+    applied_scale: f32,
+    themes_rev: u64,
+    pub(crate) export_path: String,
+    pub(crate) confirm_replace: bool,
     #[cfg(feature = "dev-shots")]
     shots: Option<shots::Shots>,
 }
@@ -75,9 +82,8 @@ impl App {
         crate::startup::mark("creator");
         let _ = crate::paths::ensure_dirs();
         let settings = Settings::load();
-        cc.egui_ctx.set_fonts(fonts::system_fonts(None));
-        cc.egui_ctx.set_zoom_factor(settings.ui_scale);
-        crate::startup::mark("fonts set");
+        crate::theme::write_example(&crate::paths::themes_dir());
+        let user_themes = crate::theme::load_user_themes(&crate::paths::themes_dir());
         let ctx = cc.egui_ctx.clone();
         let engine = Engine::start(
             crate::engine::EngineConfig {
@@ -86,6 +92,7 @@ impl App {
                 db_path: crate::paths::db_path(),
                 thumbs_dir: crate::paths::thumbs_dir(),
                 subs_dir: crate::paths::subs_dir(),
+                themes_dir: crate::paths::themes_dir(),
             },
             std::sync::Arc::new(move |d: std::time::Duration| {
                 if d.is_zero() {
@@ -106,10 +113,58 @@ impl App {
             toasts: Vec::new(),
             bench_exit,
             frames: 0,
+            user_themes,
+            applied_theme: None,
+            applied_font: None,
+            applied_scale: 0.0,
+            themes_rev: 0,
+            export_path: crate::paths::home()
+                .join("BearDL-settings.json")
+                .display()
+                .to_string(),
+            confirm_replace: false,
             #[cfg(feature = "dev-shots")]
             shots: shots::Shots::from_env(),
         }
         .with_dev_setup()
+        .with_theme(&cc.egui_ctx)
+    }
+
+    fn with_theme(mut self, ctx: &egui::Context) -> Self {
+        self.apply_theme(ctx);
+        crate::startup::mark("theme and fonts set");
+        self
+    }
+
+    pub(crate) fn reload_themes(&mut self) {
+        self.user_themes = crate::theme::load_user_themes(&crate::paths::themes_dir());
+        self.applied_theme = None;
+        self.applied_font = None;
+    }
+
+    /// Applies the selected theme (colours, spacing, font sizes, optional font file) and the
+    /// UI scale. Runs only when something changed.
+    fn apply_theme(&mut self, ctx: &egui::Context) {
+        if self.applied_scale != self.settings.ui_scale {
+            self.applied_scale = self.settings.ui_scale;
+            ctx.set_zoom_factor(self.settings.ui_scale);
+        }
+        if self.applied_theme.as_deref() == Some(self.settings.theme.as_str()) {
+            return;
+        }
+        let theme = crate::theme::find(&self.settings.theme, &self.user_themes);
+        ctx.all_styles_mut(|s| theme.apply(s));
+        ctx.set_theme(if theme.dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        let font = theme.font_path();
+        if self.applied_font.as_ref() != Some(&font) {
+            ctx.set_fonts(fonts::system_fonts(font.as_deref()));
+            self.applied_font = Some(font);
+        }
+        self.applied_theme = Some(self.settings.theme.clone());
     }
 
     fn with_dev_setup(#[allow(unused_mut)] mut self) -> Self {
@@ -284,7 +339,19 @@ impl eframe::App for App {
             }
         });
         self.show_toasts(&ctx);
+        let (imported, themes_rev) = {
+            let mut st = self.engine.state();
+            (st.imported_settings.take(), st.themes_rev)
+        };
+        if let Some(s) = imported {
+            self.settings = s;
+        }
+        if themes_rev != self.themes_rev {
+            self.themes_rev = themes_rev;
+            self.reload_themes();
+        }
         self.sync_settings(&ctx);
+        self.apply_theme(&ctx);
 
         #[cfg(feature = "dev-shots")]
         if let Some(s) = self.shots.as_mut() {

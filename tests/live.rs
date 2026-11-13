@@ -34,6 +34,7 @@ fn start(h: &std::path::Path) -> Engine {
             db_path: h.join("library.sqlite"),
             thumbs_dir: h.join("thumbs"),
             subs_dir: h.join("subs"),
+            themes_dir: h.join("themes"),
         },
         Arc::new(|_| {}),
     )
@@ -146,6 +147,7 @@ fn pause_resume_cancel() {
             db_path: h.join("library.sqlite"),
             thumbs_dir: h.join("thumbs"),
             subs_dir: h.join("subs"),
+            themes_dir: h.join("themes"),
         },
         Arc::new(|_| {}),
     );
@@ -245,6 +247,7 @@ fn immediate_resume_after_pause_completes() {
             db_path: h.join("library.sqlite"),
             thumbs_dir: h.join("thumbs"),
             subs_dir: h.join("subs"),
+            themes_dir: h.join("themes"),
         },
         Arc::new(|_| {}),
     );

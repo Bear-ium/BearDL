@@ -68,6 +68,15 @@ pub enum Cmd {
     },
     DeletePreset(String),
     ValidateArgs(String),
+    Export {
+        path: PathBuf,
+        settings: Box<Settings>,
+    },
+    Import {
+        path: PathBuf,
+        mode: crate::export::ImportMode,
+        current: Box<Settings>,
+    },
     Shutdown,
 }
 
@@ -127,6 +136,10 @@ pub struct State {
     pub library_rev: u64,
     /// Quick downloads still being expanded into items.
     pub expanding: usize,
+    /// Settings read from an import, for the UI to adopt (it owns settings).
+    pub imported_settings: Option<Settings>,
+    /// Bumped when theme files change on disk (after an import).
+    pub themes_rev: u64,
 }
 
 impl State {
@@ -181,6 +194,7 @@ pub struct EngineConfig {
     pub db_path: PathBuf,
     pub thumbs_dir: PathBuf,
     pub subs_dir: PathBuf,
+    pub themes_dir: PathBuf,
 }
 
 impl Engine {
@@ -257,6 +271,7 @@ struct Core {
     db: Option<Db>,
     thumbs_dir: PathBuf,
     subs_dir: PathBuf,
+    themes_dir: PathBuf,
     rx: mpsc::UnboundedReceiver<Cmd>,
     done_tx: mpsc::UnboundedSender<Done>,
     done_rx: mpsc::UnboundedReceiver<Done>,
@@ -299,6 +314,7 @@ impl Core {
             db,
             thumbs_dir: cfg.thumbs_dir,
             subs_dir: cfg.subs_dir,
+            themes_dir: cfg.themes_dir,
             rx,
             done_tx,
             done_rx,
@@ -434,6 +450,58 @@ impl Core {
         }
     }
 
+    fn export(&mut self, path: &std::path::Path, settings: &Settings) {
+        let Some(db) = &self.db else { return };
+        let res = crate::export::build(db, settings, &self.themes_dir)
+            .and_then(|b| crate::export::write(path, &b).map(|_| b));
+        self.shared.update(|s| match res {
+            Ok(b) => s.notify(
+                Level::Info,
+                format!(
+                    "Exported settings, {} preset(s), {} subscription(s) and {} theme(s) to {}",
+                    b.presets.len(),
+                    b.subscriptions.len(),
+                    b.themes.len(),
+                    path.display()
+                ),
+            ),
+            Err(e) => s.notify(Level::Error, format!("Export failed: {e}")),
+        });
+    }
+
+    fn import(
+        &mut self,
+        path: &std::path::Path,
+        mode: crate::export::ImportMode,
+        current: &Settings,
+    ) {
+        let Some(db) = self.db.as_mut() else { return };
+        let res = crate::export::read(path)
+            .and_then(|b| crate::export::apply(db, &b, current, &self.themes_dir, mode));
+        match res {
+            Ok(sum) => {
+                let presets = db
+                    .presets()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(_, name, json)| Preset {
+                        name,
+                        options: serde_json::from_str(&json).unwrap_or_default(),
+                    })
+                    .collect();
+                self.shared.update(|s| {
+                    s.presets = presets;
+                    s.imported_settings = sum.settings.clone();
+                    s.themes_rev += 1;
+                    s.notify(Level::Info, sum.describe());
+                });
+            }
+            Err(e) => self
+                .shared
+                .update(|s| s.notify(Level::Error, format!("Import failed: {e}"))),
+        }
+    }
+
     fn next_tool_job(&mut self) {
         if self.tools_busy.is_some() {
             return;
@@ -541,6 +609,12 @@ impl Core {
             Cmd::SavePreset { old_name, preset } => self.save_preset(old_name, preset),
             Cmd::DeletePreset(name) => self.delete_preset(&name),
             Cmd::ValidateArgs(args) => self.validate_args(args),
+            Cmd::Export { path, settings } => self.export(&path, &settings),
+            Cmd::Import {
+                path,
+                mode,
+                current,
+            } => self.import(&path, mode, &current),
             Cmd::Shutdown => {}
         }
     }
