@@ -2,6 +2,7 @@
 name = "beardl"
 version = "0.1.0"
 edition = "2024"
+license = "0BSD"
 
 [dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "x11", "wayland", "clipboard"] }
