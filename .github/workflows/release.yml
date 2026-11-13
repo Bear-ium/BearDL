@@ -41,8 +41,9 @@ jobs:
       - run: cargo test --locked
 
       # Apple Silicon only runs signed code; the linker's ad-hoc signature must survive `strip`.
+      # Intel binaries are not signed by the linker and do not need to be.
       - name: Check the ad-hoc signature
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: codesign --verify --verbose target/release/beardl
 
       - name: Package
